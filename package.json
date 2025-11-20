@@ -1,0 +1,31 @@
+{
+  "name": "cian-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram бот для автоматической рассылки сообщений на CIAN",
+  "main": "telegram-bot.js",
+  "scripts": {
+    "dev": "node telegram-bot.js",
+    "start": "node telegram-bot.js",
+    "test": "node test-cian.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "cian",
+    "automation",
+    "real-estate"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "23.10.0",
+    "puppeteer-extra": "3.3.6",
+    "puppeteer-extra-plugin-stealth": "2.11.2",
+    "node-telegram-bot-api": "0.66.0",
+    "dotenv": "16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
