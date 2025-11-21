@@ -1134,22 +1134,16 @@ class CianMailer {
             }
         }
 
-        const forceRemoved = await this.page.evaluate(selector => {
-            const iframe = document.querySelector(selector);
-            if (iframe && iframe.parentElement) {
-                iframe.parentElement.remove();
-                return true;
-            }
-            return false;
-        }, iframeSelector);
-
-        if (forceRemoved) {
-            this.log('⚠️ Пришлось принудительно удалить iframe из DOM', 'warning');
+        this.log('❌ Не удалось закрыть iframe чата — обновляю страницу', 'error');
+        try {
+            await this.page.reload({ waitUntil: 'networkidle2', timeout: 0 });
+            await this.delay(3, 5);
+            this.log('🔄 Страница перезагружена после неуспешного закрытия iframe');
             return true;
+        } catch (reloadError) {
+            this.log(`❌ Ошибка перезагрузки страницы: ${reloadError.message}`, 'error');
+            return false;
         }
-
-        this.log('❌ Не удалось закрыть iframe чата', 'error');
-        return false;
     }
 
     async processPage(pageNum) {
@@ -1427,13 +1421,18 @@ class CianMailer {
 
                     // Закрываем окно
                     this.log('Закрываю окно...');
+                    let chatClosed = false;
                     try {
                         await messageField.press('Escape');
                     } catch (pressError) {
                         await this.page.keyboard.press('Escape');
                     }
                     await this.delay(0.8, 1.2);
-                    await this.ensureChatClosed(frame);
+                    chatClosed = await this.ensureChatClosed(frame);
+                    if (!chatClosed) {
+                        this.log('⏭️  Перехожу к следующему объявлению после перезагрузки страницы', 'warning');
+                        continue;
+                    }
 
                     processed++;
 
