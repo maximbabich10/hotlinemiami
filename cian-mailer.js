@@ -27,6 +27,15 @@ class CianMailer {
         this.disableProcessedCheck = config.alwaysProcess !== undefined ? !!config.alwaysProcess : true;
         this.logFile = 'cian_mailer.log';
         this.errorLogFile = 'error_log.txt';
+
+        const proxyString =
+            config.proxy ||
+            process.env.PROXY_URL ||
+            process.env.HTTP_PROXY ||
+            process.env.HTTPS_PROXY ||
+            null;
+
+        this.proxyConfig = this.parseProxyString(proxyString);
         
         this.messageVariants = [
             `Здравствуйте!
@@ -158,6 +167,33 @@ class CianMailer {
         await new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    parseProxyString(proxyString) {
+        console.log('proxyString', proxyString);
+        if (!proxyString) {
+            return null;
+        }
+
+        try {
+            const normalized = proxyString.includes('://') ? proxyString : `http://${proxyString}`;
+            const proxyUrl = new URL(normalized);
+            const server = `${proxyUrl.protocol}//${proxyUrl.hostname}${proxyUrl.port ? `:${proxyUrl.port}` : ''}`;
+
+            const auth =
+                proxyUrl.username || proxyUrl.password
+                    ? {
+                          username: decodeURIComponent(proxyUrl.username),
+                          password: decodeURIComponent(proxyUrl.password)
+                      }
+                    : null;
+
+            this.log(`Использую прокси-сервер ${server}${auth ? ' с авторизацией' : ''}`);
+            return { server, auth };
+        } catch (error) {
+            this.log(`Некорректная строка прокси "${proxyString}": ${error.message}`, 'warning');
+            return null;
+        }
+    }
+
     async loadProcessedIds() {
         if (this.disableProcessedCheck) {
             this.processedIds = new Set();
@@ -200,22 +236,32 @@ class CianMailer {
                 this.log('⚠️ Google Chrome не найден, использую встроенный Chromium', 'warning');
             }
             
+            const launchArgs = [
+                '--start-maximized',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--lang=ru-RU,ru'
+            ];
+
+            if (this.proxyConfig?.server) {
+                launchArgs.push(`--proxy-server=${this.proxyConfig.server}`);
+            }
+
             this.browser = await puppeteer.launch({
                 headless: false, // Показываем браузер
                 executablePath: browserPath, // Используем Chrome если найден, иначе Chromium
-                args: [
-                    '--start-maximized',
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--disable-web-security',
-                    '--lang=ru-RU,ru'
-                ],
+                args: launchArgs,
                 defaultViewport: null
             });
 
             this.page = await this.browser.newPage();
+
+            if (this.proxyConfig?.auth) {
+                await this.page.authenticate(this.proxyConfig.auth);
+            }
             
             // Скрываем факт автоматизации
             await this.page.evaluateOnNewDocument(() => {
