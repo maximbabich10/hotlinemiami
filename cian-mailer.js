@@ -142,18 +142,28 @@ class CianMailer {
                 headless: false, // Показываем браузер
                 executablePath: browserPath, // Используем Chrome если найден, иначе Chromium
                 args: [
-                    '--start-maximized',
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-blink-features=AutomationControlled',
                     '--disable-dev-shm-usage',
                     '--disable-web-security',
-                    '--lang=ru-RU,ru'
+                    '--lang=ru-RU,ru',
+                    '--window-size=4010,2610',
+                    '--window-position=0,0'
                 ],
-                defaultViewport: null
+                defaultViewport: {
+                    width: 4010,
+                    height: 2610
+                }
             });
 
             this.page = await this.browser.newPage();
+            
+            // Устанавливаем фиксированный размер окна
+            await this.page.setViewport({
+                width: 4010,
+                height: 2610
+            });
             
             // Скрываем факт автоматизации
             await this.page.evaluateOnNewDocument(() => {
