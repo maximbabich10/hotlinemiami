@@ -16,14 +16,15 @@ class CianMailer {
         this.phone = config.phone;
         this.maxPages = config.maxPages || 5;
         this.maxPerPage = config.maxPerPage || 10;
-        this.minPause = config.minPause || 15;
-        this.maxPause = config.maxPause || 25;
+        this.minPause = config.minPause || 4;
+        this.maxPause = config.maxPause || 10;
         
         this.browser = null;
         this.page = null;
         this.processedFile = 'processed_ads.txt';
         this.processedIds = new Set();
-        this.disableProcessedCheck = config.alwaysProcess !== undefined ? !!config.alwaysProcess : true;
+        this.alwaysProcess = !!config.alwaysProcess;
+        this.notifier = typeof config.notifier === 'function' ? config.notifier : null;
         this.logFile = 'cian_mailer.log';
         this.errorLogFile = 'error_log.txt';
         
@@ -33,81 +34,7 @@ class CianMailer {
         this.messageVariants = [
             `Здравствуйте!
 
-Меня зовут Александр, я занимаюсь продажей недвижимости в Москве (ЦАО). Предлагаю вам быструю и выгодную продажу вашей квартиры.
-
-- Ипотечные программы на вторичное жилье со ставкой от 12,25% при первоначальном взносе от 27%
-- Благодаря правильному подходу, вашу квартиру смогу продать в кратчайшие сроки
-- Высокий спрос на жильё в Москве способствует быстрой реализации объектов
-- Я лично сопровождаю каждый показ и веду переговоры для максимального результата
-
-Размещение и консультации с нашей стороны — бесплатно и без обязательств.
-
-Если интересно, могу выслать презентацию с примером нашей работы и подходом.
-
-Буду рад помочь!
-Связаться со мной можно по телефону: 8 (996) 090-58-44
-
-Александр, эксперт по недвижимости, ул. Большая Дмитровка, д. 32, стр. 4`,
-
-            `Добрый день!
-
-Александр, специалист по продаже недвижимости в ЦАО Москвы. Помогу быстро и выгодно реализовать вашу квартиру.
-
-Что я предлагаю:
-- Ипотека на вторичку от 12,25% годовых (первый взнос от 27%)
-- Профессиональный подход позволяет продать квартиру максимально быстро
-- Благодаря высокому спросу на московское жильё, объекты реализуются оперативно
-- Личное сопровождение всех показов и ведение переговоров с покупателями
-
-Консультации и размещение объявлений — бесплатно, без каких-либо обязательств.
-
-По вашему желанию вышлю презентацию с примерами моей работы.
-
-С удовольствием помогу!
-Телефон: 8 (996) 090-58-44
-
-Александр, эксперт по недвижимости
-ул. Большая Дмитровка, д. 32, стр. 4`,
-
-            `Здравствуйте!
-
-Меня зовут Александр, помогаю с продажей квартир в Москве (ЦАО). Специализируюсь на быстрой и выгодной реализации.
-
-Преимущества работы со мной:
-- Ипотечные программы для покупателей от 12,25% (взнос от 27%)
-- Профессиональный подход — продажа в кратчайшие сроки
-- Высокий спрос на московскую недвижимость работает на вас
-- Личное участие в каждом показе и переговорах
-
-Размещение объявлений и консультации — полностью бесплатны.
-
-Готов выслать презентацию с примерами успешных сделок.
-
-Буду рад сотрудничеству!
-Мой телефон: 8 (996) 090-58-44
-
-Александр, риэлтор
-ул. Большая Дмитровка, д. 32, стр. 4`,
-
-            `Приветствую!
-
-Александр, эксперт по недвижимости в ЦАО Москвы. Предлагаю профессиональную помощь в продаже вашей квартиры.
-
-Что входит в мой сервис:
-- Подбор ипотечных программ для покупателей (ставка от 12,25%, взнос от 27%)
-- Эффективная стратегия продажи — минимальные сроки реализации
-- Использование высокого спроса на столичное жильё для быстрой продажи
-- Персональное сопровождение показов и профессиональное ведение переговоров
-
-Все консультации и размещение — бесплатно, никаких обязательств с вашей стороны.
-
-Могу предоставить презентацию с кейсами и подходом к работе.
-
-Буду рад помочь в продаже!
-Контактный телефон: 8 (996) 090-58-44
-
-Александр, специалист по недвижимости
-Адрес: ул. Большая Дмитровка, д. 32, стр. 4`
+`
         ];
 
         this.captchaApiKey = config.captchaApiKey || process.env.CAPTCHA_API_KEY || null;
@@ -161,7 +88,7 @@ class CianMailer {
     }
 
     async loadProcessedIds() {
-        if (this.disableProcessedCheck) {
+        if (this.alwaysProcess) {
             this.processedIds = new Set();
             this.log('Режим alwaysProcess включён — список обработанных не используется');
             return;
@@ -177,13 +104,22 @@ class CianMailer {
     }
 
     async saveProcessedId(adId) {
-        if (this.disableProcessedCheck) return;
+        if (this.alwaysProcess) return;
         await fs.appendFile(this.processedFile, `${adId}\n`);
         this.processedIds.add(adId);
     }
 
     isProcessed(adId) {
-        return this.disableProcessedCheck ? false : this.processedIds.has(adId);
+        return this.alwaysProcess ? false : this.processedIds.has(adId);
+    }
+
+    notify(event, payload = {}) {
+        if (!this.notifier) return;
+        try {
+            this.notifier(event, payload);
+        } catch (error) {
+            this.log(`Ошибка в notifier: ${error.message}`, 'warning');
+        }
     }
 
     async initBrowser() {
@@ -886,22 +822,36 @@ class CianMailer {
 
     async clickSendButton(frame) {
         try {
-            let sendButton = await frame.$('button[type="submit"]');
+            let sendButton = await frame.$('[data-testid="send_button"], [data-name="MessageInputField_send_button"], button[class*="MessageInputField_send_button"], button[type="submit"]');
 
             if (!sendButton) {
-                const [byText] = await frame.$x("//button[contains(., 'Отправить') or contains(., 'отправить') or contains(., 'Send') or contains(., 'send')]");
-                if (byText) {
-                    sendButton = byText;
-                }
-            }
+                const handle = await frame.evaluateHandle(() => {
+                    const selectors = [
+                        '[data-testid="send_button"]',
+                        '[data-name="MessageInputField_send_button"]',
+                        'button[class*="MessageInputField_send_button"]',
+                        'button[type="submit"]'
+                    ];
 
-            if (!sendButton) {
-                const candidates = await frame.$$('button');
-                for (const candidate of candidates) {
-                    const text = await candidate.evaluate(el => (el.textContent || '').toLowerCase());
-                    if (text.includes('отправить') || text.includes('send')) {
-                        sendButton = candidate;
-                        break;
+                    for (const selector of selectors) {
+                        const btn = document.querySelector(selector);
+                        if (btn) return btn;
+                    }
+
+                    const fallback = Array.from(document.querySelectorAll('button')).find(btn => {
+                        const text = (btn.textContent || '').toLowerCase();
+                        return text.includes('отправить') || text.includes('send');
+                    });
+
+                    return fallback || null;
+                });
+
+                if (handle) {
+                    const element = handle.asElement();
+                    if (element) {
+                        sendButton = element;
+                    } else {
+                        await handle.dispose();
                     }
                 }
             }
@@ -911,8 +861,8 @@ class CianMailer {
                 return false;
             }
 
-            await sendButton.focus();
-            await this.delay(0.3, 0.5);
+            await frame.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }), sendButton);
+            await this.delay(0.2, 0.4);
             await sendButton.click();
             this.log('📨 Нажал кнопку "Отправить"', 'success');
             await this.delay(5, 8);
@@ -1142,9 +1092,16 @@ class CianMailer {
                 this.log(`   📍 Адрес: ${btnData.address}`);
                 this.log(`   💰 Цена: ${btnData.price}`);
                 this.log(`   🔘 Кнопка: "${btnData.buttonText}"`);
+                this.notify('ad-start', {
+                    index: i + 1,
+                    total: buttonsToProcess.length,
+                    adId: btnData.adId,
+                    address: btnData.address,
+                    price: btnData.price
+                });
 
                 // Проверяем, обработано ли
-                if (!this.disableProcessedCheck && this.isProcessed(btnData.adId)) {
+                if (!this.alwaysProcess && this.isProcessed(btnData.adId)) {
                     this.log('УЖЕ ОБРАБОТАНО РАНЕЕ - пропускаю', 'warning');
                     continue;
                 }
@@ -1346,6 +1303,14 @@ class CianMailer {
                     this.log('ВВОД ЗАВЕРШЕН!', 'success');
                     await this.delay(2, 3);
 
+                    const sendSuccess = await this.clickSendButton(frame);
+                    if (!sendSuccess) {
+                        this.log('❌ Не удалось нажать кнопку отправки, пропускаю объявление', 'error');
+                        await this.page.keyboard.press('Escape');
+                        await this.delay(1, 2);
+                        continue;
+                    }
+
                     // Сохраняем скриншот IFRAME (а не всей страницы!)
                     try {
                         // Делаем скриншот именно frame, а не всей страницы
@@ -1361,14 +1326,20 @@ class CianMailer {
                     }
 
                     this.log('⏸️  Пауза 10 сек — проверь визуально текст в чате');
-                    await this.delay(10, 10);
-                    this.log('⏭️  Сообщение не отправляю (тестовый режим)');
+                    await this.delay(30, 30);
+                    this.log('✉️  Повторно нажимаю "Отправить" для надёжности');
+                    await this.clickSendButton(frame);
 
                     // Сохраняем как обработанный
-                    if (!this.disableProcessedCheck) {
+                    if (!this.alwaysProcess) {
                         await this.saveProcessedId(btnData.adId);
                         this.log(`ID ${btnData.adId} сохранён в список обработанных`, 'success');
                     }
+                    this.notify('ad-complete', {
+                        adId: btnData.adId,
+                        address: btnData.address,
+                        price: btnData.price
+                    });
 
                     // Закрываем окно
                     this.log('Закрываю окно...');
