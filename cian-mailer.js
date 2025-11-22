@@ -16,14 +16,15 @@ class CianMailer {
         this.phone = config.phone;
         this.maxPages = config.maxPages || 5;
         this.maxPerPage = config.maxPerPage || 10;
-        this.minPause = config.minPause || 15;
-        this.maxPause = config.maxPause || 25;
+        this.minPause = config.minPause || 4;
+        this.maxPause = config.maxPause || 10;
         
         this.browser = null;
         this.page = null;
         this.processedFile = 'processed_ads.txt';
         this.processedIds = new Set();
-        this.disableProcessedCheck = config.alwaysProcess !== undefined ? !!config.alwaysProcess : true;
+        this.alwaysProcess = !!config.alwaysProcess;
+        this.notifier = typeof config.notifier === 'function' ? config.notifier : null;
         this.logFile = 'cian_mailer.log';
         this.errorLogFile = 'error_log.txt';
         
@@ -161,7 +162,7 @@ class CianMailer {
     }
 
     async loadProcessedIds() {
-        if (this.disableProcessedCheck) {
+        if (this.alwaysProcess) {
             this.processedIds = new Set();
             this.log('Режим alwaysProcess включён — список обработанных не используется');
             return;
@@ -177,13 +178,13 @@ class CianMailer {
     }
 
     async saveProcessedId(adId) {
-        if (this.disableProcessedCheck) return;
+        if (this.alwaysProcess) return;
         await fs.appendFile(this.processedFile, `${adId}\n`);
         this.processedIds.add(adId);
     }
 
     isProcessed(adId) {
-        return this.disableProcessedCheck ? false : this.processedIds.has(adId);
+        return this.alwaysProcess ? false : this.processedIds.has(adId);
     }
 
     async initBrowser() {
@@ -1142,9 +1143,16 @@ class CianMailer {
                 this.log(`   📍 Адрес: ${btnData.address}`);
                 this.log(`   💰 Цена: ${btnData.price}`);
                 this.log(`   🔘 Кнопка: "${btnData.buttonText}"`);
+                this.notify('ad-start', {
+                    index: i + 1,
+                    total: buttonsToProcess.length,
+                    adId: btnData.adId,
+                    address: btnData.address,
+                    price: btnData.price
+                });
 
                 // Проверяем, обработано ли
-                if (!this.disableProcessedCheck && this.isProcessed(btnData.adId)) {
+                if (!this.alwaysProcess && this.isProcessed(btnData.adId)) {
                     this.log('УЖЕ ОБРАБОТАНО РАНЕЕ - пропускаю', 'warning');
                     continue;
                 }
@@ -1365,10 +1373,15 @@ class CianMailer {
                     this.log('⏭️  Сообщение не отправляю (тестовый режим)');
 
                     // Сохраняем как обработанный
-                    if (!this.disableProcessedCheck) {
+                    if (!this.alwaysProcess) {
                         await this.saveProcessedId(btnData.adId);
                         this.log(`ID ${btnData.adId} сохранён в список обработанных`, 'success');
                     }
+                    this.notify('ad-complete', {
+                        adId: btnData.adId,
+                        address: btnData.address,
+                        price: btnData.price
+                    });
 
                     // Закрываем окно
                     this.log('Закрываю окно...');
