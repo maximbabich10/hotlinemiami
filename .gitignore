@@ -22,6 +22,12 @@ error_log.txt
 processed_ads.txt
 cian_mailing_stats.csv
 
+# Database
+users.db
+users.db-journal
+*.db
+*.db-journal
+
 # Python (old files)
 __pycache__/
 *.py[cod]
