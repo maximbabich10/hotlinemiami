@@ -10,27 +10,46 @@ async function test() {
     console.log('🧪 ТЕСТОВЫЙ ЗАПУСК CIAN MAILER\n');
     
     // Проверка переменных окружения
-    if (!process.env.CIAN_EMAIL || !process.env.CIAN_PASSWORD) {
-        console.error('❌ ОШИБКА: Не указаны CIAN_EMAIL или CIAN_PASSWORD в .env файле');
+    if (!process.env.CIAN_PHONE) {
+        console.error('❌ ОШИБКА: Не указан CIAN_PHONE в .env файле');
         console.log('\n📝 Создайте файл .env на основе env.example:');
         console.log('   cp env.example .env');
-        console.log('   # Затем отредактируйте .env и укажите свои данные\n');
+        console.log('   # Затем отредактируйте .env и укажите номер телефона\n');
+        console.log('   Формат: CIAN_PHONE=9771234567 (10 цифр без +7 или 8)\n');
         process.exit(1);
     }
     
     console.log('✅ Конфигурация загружена');
-    console.log(`📧 Email: ${process.env.CIAN_EMAIL}`);
+    const phone = process.env.CIAN_PHONE || '';
+    const maskedPhone = `+7 (${phone.substring(0, 3)}) ***-**-${phone.substring(8, 10)}`;
+    console.log(`📱 Телефон: ${maskedPhone}`);
     console.log(`📄 Макс. страниц: ${process.env.MAX_PAGES || '5'}`);
     console.log(`📨 Макс. объявлений/страницу: ${process.env.MAX_PER_PAGE || '10'}`);
     console.log(`⏱️  Пауза: ${process.env.MIN_PAUSE || '15'}-${process.env.MAX_PAUSE || '25'} сек\n`);
     
+    const readline = require('readline');
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+    
+    // Создаем промис для получения кода от пользователя
+    const getCodeFromConsole = () => {
+        return new Promise((resolve) => {
+            rl.question('📱 Введите код из SMS: ', (code) => {
+                resolve(code.trim());
+            });
+        });
+    };
+    
     const mailer = new CianMailer({
-        email: process.env.CIAN_EMAIL,
-        password: process.env.CIAN_PASSWORD,
+        phone: process.env.CIAN_PHONE,
         maxPages: parseInt(process.env.MAX_PAGES || '2'),  // Для теста - только 2 страницы
         maxPerPage: parseInt(process.env.MAX_PER_PAGE || '5'),  // Для теста - только 5 объявлений
         minPause: parseInt(process.env.MIN_PAUSE || '15'),
-        maxPause: parseInt(process.env.MAX_PAUSE || '25')
+        maxPause: parseInt(process.env.MAX_PAUSE || '25'),
+        // Callback для получения кода (в консоли)
+        onCodeRequest: getCodeFromConsole
     });
     
     console.log('🚀 Запускаю тестовую рассылку...\n');
@@ -40,6 +59,8 @@ async function test() {
     console.log('\n🛑 Нажмите Ctrl+C для остановки\n');
     
     const result = await mailer.run();
+    
+    rl.close(); // Закрываем readline
     
     if (result.success) {
         console.log('\n✅ ТЕСТ ЗАВЕРШЕН УСПЕШНО!');

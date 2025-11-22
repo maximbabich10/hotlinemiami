@@ -13,8 +13,7 @@ puppeteer.use(StealthPlugin());
 
 class CianMailer {
     constructor(config = {}) {
-        this.email = config.email;
-        this.password = config.password;
+        this.phone = config.phone;
         this.maxPages = config.maxPages || 5;
         this.maxPerPage = config.maxPerPage || 10;
         this.minPause = config.minPause || 15;
@@ -27,15 +26,9 @@ class CianMailer {
         this.disableProcessedCheck = config.alwaysProcess !== undefined ? !!config.alwaysProcess : true;
         this.logFile = 'cian_mailer.log';
         this.errorLogFile = 'error_log.txt';
-
-        const proxyString =
-            config.proxy ||
-            process.env.PROXY_URL ||
-            process.env.HTTP_PROXY ||
-            process.env.HTTPS_PROXY ||
-            null;
-
-        this.proxyConfig = this.parseProxyString(proxyString);
+        
+        // Callback для получения кода авторизации от Telegram бота
+        this.onCodeRequest = config.onCodeRequest || null;
         
         this.messageVariants = [
             `Здравствуйте!
@@ -167,33 +160,6 @@ class CianMailer {
         await new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    parseProxyString(proxyString) {
-        console.log('proxyString', proxyString);
-        if (!proxyString) {
-            return null;
-        }
-
-        try {
-            const normalized = proxyString.includes('://') ? proxyString : `http://${proxyString}`;
-            const proxyUrl = new URL(normalized);
-            const server = `${proxyUrl.protocol}//${proxyUrl.hostname}${proxyUrl.port ? `:${proxyUrl.port}` : ''}`;
-
-            const auth =
-                proxyUrl.username || proxyUrl.password
-                    ? {
-                          username: decodeURIComponent(proxyUrl.username),
-                          password: decodeURIComponent(proxyUrl.password)
-                      }
-                    : null;
-
-            this.log(`Использую прокси-сервер ${server}${auth ? ' с авторизацией' : ''}`);
-            return { server, auth };
-        } catch (error) {
-            this.log(`Некорректная строка прокси "${proxyString}": ${error.message}`, 'warning');
-            return null;
-        }
-    }
-
     async loadProcessedIds() {
         if (this.disableProcessedCheck) {
             this.processedIds = new Set();
@@ -236,32 +202,22 @@ class CianMailer {
                 this.log('⚠️ Google Chrome не найден, использую встроенный Chromium', 'warning');
             }
             
-            const launchArgs = [
-                '--start-maximized',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--lang=ru-RU,ru'
-            ];
-
-            if (this.proxyConfig?.server) {
-                launchArgs.push(`--proxy-server=${this.proxyConfig.server}`);
-            }
-
             this.browser = await puppeteer.launch({
                 headless: false, // Показываем браузер
                 executablePath: browserPath, // Используем Chrome если найден, иначе Chromium
-                args: launchArgs,
+                args: [
+                    '--start-maximized',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--disable-web-security',
+                    '--lang=ru-RU,ru'
+                ],
                 defaultViewport: null
             });
 
             this.page = await this.browser.newPage();
-
-            if (this.proxyConfig?.auth) {
-                await this.page.authenticate(this.proxyConfig.auth);
-            }
             
             // Скрываем факт автоматизации
             await this.page.evaluateOnNewDocument(() => {
@@ -280,7 +236,7 @@ class CianMailer {
 
     async loginToCian() {
         try {
-            this.log('🔐 Начинаем авторизацию на CIAN...');
+            this.log('🔐 Начинаем авторизацию на CIAN по номеру телефона...');
             
             await this.page.goto('https://www.cian.ru/', { waitUntil: 'networkidle2' });
             await this.delay(2, 4);
@@ -291,269 +247,212 @@ class CianMailer {
             await this.page.click('[data-name="LoginButton"], a[href*="auth"]');
             await this.delay(2, 4);
 
-            // ШАГ 1: Ждём МОДАЛЬНОЕ ОКНО авторизации (как в Python)
+            // ШАГ 1: Ждём МОДАЛЬНОЕ ОКНО авторизации
             this.log('🔍 Ищу модальное окно авторизации...');
             await this.page.waitForSelector('[role="dialog"], .modal, [class*="Modal"]', { timeout: 10000 });
             this.log('✅ Найдено модальное окно');
-            await this.delay(2, 4); // Как в Python: time.sleep(random.uniform(2, 4))
+            await this.delay(2, 4);
 
-            // ШАГ 2: Ищем кнопку "Другой способ" ВНУТРИ модального окна (как в Python)
-            this.log('🔍 Ищу кнопку "Другой способ" в модальном окне...');
-            try {
-                const otherMethodClicked = await this.page.evaluate(() => {
-                    const modal = document.querySelector('[role="dialog"]') || 
-                                 document.querySelector('.modal') || 
-                                 document.querySelector('[class*="Modal"]');
-                    
-                    if (modal) {
-                        // XPath эквивалент: .//button[contains(., 'Другой способ')]
-                        const allElements = Array.from(modal.querySelectorAll('button, a, span'));
-                        const otherMethodButton = allElements.find(el => 
-                            el.textContent.includes('Другой способ') || 
-                            el.textContent.includes('другой способ')
-                        );
-                        
-                        if (otherMethodButton) {
-                            otherMethodButton.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-                
-                if (otherMethodClicked) {
-                    this.log('✅ Найдена кнопка "Другой способ"');
-                    this.log('🖱️  Кликнул "Другой способ"');
-                    await this.delay(2, 3); // Как в Python
-                } else {
-                    this.log('ℹ️  Кнопка "Другой способ" не найдена (возможно, сразу форма email)');
-                }
-            } catch (e) {
-                this.log('Ошибка при поиске "Другой способ": ' + e.message, 'warning');
-            }
+            // ШАГ 2: Ищем и заполняем поле телефона (по умолчанию показывается)
+            this.log('🔍 Ищу поле ввода телефона в модальном окне...');
 
-            // ШАГ 3: Ждём и заполняем поле email ВНУТРИ модального окна (как в Python)
-            this.log('🔍 Ищу поле Email в модальном окне...');
             
             try {
-                // Ждем появления поля email ВНУТРИ модального окна
-                const emailInput = await this.page.evaluateHandle(() => {
+                // Ждем появления поля телефона ВНУТРИ модального окна
+                const phoneInput = await this.page.evaluateHandle(() => {
                     const modal = document.querySelector('[role="dialog"]') || 
                                  document.querySelector('.modal') || 
                                  document.querySelector('[class*="Modal"]');
                     
                     if (!modal) return null;
                     
-                    // Ищем поле email ВНУТРИ модального окна (все варианты как в Python)
-                    return modal.querySelector('input[type="email"]') || 
-                           modal.querySelector('input[name="email"]') ||
-                           modal.querySelector('input[type="text"]') ||
-                           modal.querySelector('input[placeholder*="E-mail"]') ||
-                           modal.querySelector('input[placeholder*="e-mail"]') ||
-                           modal.querySelector('input[autocomplete="username"]') ||
-                           modal.querySelector('input[autocomplete="email"]');
+                    // Ищем поле телефона ВНУТРИ модального окна
+                    return modal.querySelector('input[type="tel"]') || 
+                           modal.querySelector('input[name="phone"]') ||
+                           modal.querySelector('input[autocomplete="tel"]') ||
+                           modal.querySelector('input[placeholder*="телефон"]') ||
+                           modal.querySelector('input[placeholder*="Телефон"]') ||
+                           modal.querySelector('input[type="text"]');
                 });
                 
-                const emailElement = emailInput.asElement();
-                if (!emailElement) {
-                    this.log('⚠️ Поле Email не найдено через evaluateHandle, пробую другой способ...', 'warning');
-                    await this.page.screenshot({ path: 'modal_no_email.png' });
-                    
-                    // Пробуем найти через обычный selector
-                    const emailSelector = 'input[type="email"], input[type="text"]';
-                    const emailField = await this.page.$(emailSelector);
-                    if (emailField) {
-                        this.log('✅ Нашел поле email альтернативным способом');
-                        await emailField.click();
-                        await this.delay(0.5, 0.5);
-                        
-                        // Вводим email простым способом
-                        await emailField.type(this.email, { delay: 100 });
-                        await this.delay(0.5, 1);
-                        this.log('✅ Email введён');
-                        // Переходим к следующему шагу
-                        await this.delay(1, 2);
-                        // Продолжаем без критической ошибки
-                    } else {
-                        throw new Error('Поле Email не найдено никаким способом');
-                    }
-                } else {
-                    this.log('✅ Найдено поле Email в модальном окне');
-                
-                    // Вводим email ПОСИМВОЛЬНО (как в Python: for char in self.email)
-                    this.log(`📧 Ввожу email: ${this.email.substring(0, 3)}***${this.email.substring(this.email.length - 10)}`);
-                    
-                    // Делаем поле видимым и активным (как в Python)
-                    await emailElement.evaluate(el => {
-                        el.scrollIntoView({ block: 'center' });
-                    });
-                    await this.delay(0.5, 0.5);
-                    
-                    // Фокусируемся и очищаем
-                    await emailElement.focus();
-                    await this.delay(0.3, 0.3);
-                    
-                    await emailElement.evaluate(el => el.value = '');
-                    await this.delay(0.2, 0.2);
-                    
-                    // Вводим ПОСИМВОЛЬНО с задержками (как человек)
-                    for (const char of this.email) {
-                        await emailElement.type(char, { delay: Math.random() * 100 + 50 }); // 0.05-0.15 сек
-                    }
-                    
-                    await this.delay(0.5, 1);
-                    this.log('✅ Email введён посимвольно');
+                const phoneElement = phoneInput.asElement();
+                if (!phoneElement) {
+                    throw new Error('Поле телефона не найдено в модальном окне');
                 }
                 
+                this.log('✅ Найдено поле телефона в модальном окне');
+                
+                // Форматируем номер: добавляем +7
+                const formattedPhone = `+7 (${this.phone.substring(0, 3)}) ${this.phone.substring(3, 6)}-${this.phone.substring(6, 8)}-${this.phone.substring(8, 10)}`;
+                this.log(`📱 Ввожу номер: +7 (${this.phone.substring(0, 3)}) ***-**-${this.phone.substring(8, 10)}`);
+                
+                // Делаем поле видимым и активным
+                await phoneElement.evaluate(el => {
+                    el.scrollIntoView({ block: 'center' });
+                });
+                await this.delay(0.5, 0.5);
+                
+                // Фокусируемся и очищаем
+                await phoneElement.focus();
+                await this.delay(0.3, 0.3);
+                
+                await phoneElement.evaluate(el => el.value = '');
+                await this.delay(0.2, 0.2);
+                
+                // Вводим номер ПОСИМВОЛЬНО с задержками (как человек)
+                for (const char of formattedPhone) {
+                    await phoneElement.type(char, { delay: Math.random() * 100 + 50 });
+                }
+                
+                await this.delay(0.5, 1);
+                this.log('✅ Номер телефона введён посимвольно');
+                
             } catch (e) {
-                this.log(`❌ Ошибка ввода email: ${e.message}`, 'error');
-                await this.page.screenshot({ path: 'email_input_error.png' });
+                this.log(`❌ Ошибка ввода телефона: ${e.message}`, 'error');
+                await this.page.screenshot({ path: 'phone_input_error.png' });
                 throw e;
             }
 
-            // ШАГ 4: Нажимаем "Продолжить" ВНУТРИ модального окна (как в Python)
-            this.log('🔍 Ищу кнопку "Продолжить" в модальном окне...');
-            const clickedContinue = await this.page.evaluate(() => {
+            // ШАГ 3: Нажимаем "Получить код"
+            this.log('🔍 Ищу кнопку "Получить код" в модальном окне...');
+            const clickedGetCode = await this.page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"]') || 
                              document.querySelector('.modal') || 
                              document.querySelector('[class*="Modal"]');
                 
                 if (modal) {
-                    // XPath эквивалент: .//button[contains(., 'Продолжить')] | .//button[@type='submit']
                     const buttons = Array.from(modal.querySelectorAll('button'));
-                    const continueBtn = buttons.find(btn => 
-                        btn.textContent.includes('Продолжить') || 
+                    const getCodeBtn = buttons.find(btn => 
+                        btn.textContent.includes('Получить код') || 
+                        btn.textContent.includes('получить код') ||
                         btn.type === 'submit'
                     );
                     
-                    if (continueBtn) {
-                        continueBtn.click();
+                    if (getCodeBtn) {
+                        getCodeBtn.click();
                         return true;
                     }
                 }
                 return false;
             });
             
-            if (!clickedContinue) {
-                this.log('⚠️ Кнопка "Продолжить" после email не найдена - пробую продолжить...', 'warning');
-                await this.page.screenshot({ path: 'continue_not_found.png' });
-                // НЕ выбрасываем ошибку - может быть другой flow
-            } else {
-                this.log('✅ Найдена кнопка "Продолжить"');
-                this.log('🖱️  Кликнул "Продолжить"');
+            if (!clickedGetCode) {
+                this.log('❌ Кнопка "Получить код" не найдена!', 'error');
+                await this.page.screenshot({ path: 'get_code_not_found.png' });
+                throw new Error('Кнопка "Получить код" не найдена');
             }
+            
+            this.log('✅ Кнопка "Получить код" нажата!');
+            this.log('📨 Код отправлен на номер +7 (***) ***-**-' + this.phone.substring(8, 10));
             await this.delay(2, 4);
 
-            // ШАГ 5: Ждём и заполняем поле пароля ВНУТРИ модального окна (как в Python)
-            this.log('🔍 Ищу поле пароля в модальном окне...');
+            // ШАГ 4: Запрашиваем код у пользователя через Telegram и ждём ввода
+            this.log('⏳ Жду ввода кода подтверждения от пользователя...');
+            
+            if (!this.onCodeRequest) {
+                throw new Error('Callback onCodeRequest не настроен! Не могу запросить код у пользователя.');
+            }
+            
+            // Запрашиваем код у пользователя через callback (Telegram бот)
+            const code = await this.onCodeRequest();
+            
+            if (!code || code.length < 4) {
+                throw new Error('Получен неверный код подтверждения');
+            }
+            
+            this.log(`✅ Получен код от пользователя: ${code.substring(0, 2)}**`);
+            
+            // ШАГ 5: Ищем поле для ввода кода
+            this.log('🔍 Ищу поле для ввода кода...');
             
             try {
-                const passwordInput = await this.page.evaluateHandle(() => {
+                await this.delay(2, 3); // Даем время загрузиться полю для кода
+                
+                const codeInput = await this.page.evaluateHandle(() => {
                     const modal = document.querySelector('[role="dialog"]') || 
                                  document.querySelector('.modal') || 
                                  document.querySelector('[class*="Modal"]');
                     
                     if (!modal) return null;
                     
-                    return modal.querySelector('input[type="password"]');
+                    // Ищем поле для кода (обычно это input[type="text"] с placeholder про код)
+                    return modal.querySelector('input[placeholder*="код"]') ||
+                           modal.querySelector('input[placeholder*="Код"]') ||
+                           modal.querySelector('input[name="code"]') ||
+                           modal.querySelector('input[type="text"]');
                 });
                 
-                const passwordElement = passwordInput.asElement();
-                if (!passwordElement) {
-                    this.log('⚠️ Поле пароля не найдено через evaluateHandle, пробую другой способ...', 'warning');
-                    await this.page.screenshot({ path: 'modal_no_password.png' });
-                    
-                    // Пробуем найти через обычный selector
-                    const passwordField = await this.page.$('input[type="password"]');
-                    if (passwordField) {
-                        this.log('✅ Нашел поле пароля альтернативным способом');
-                        await passwordField.click();
-                        await this.delay(0.5, 0.5);
-                        
-                        // Вводим пароль простым способом
-                        await passwordField.type(this.password, { delay: 100 });
-                        await this.delay(0.5, 1);
-                        this.log('✅ Пароль введён');
-                        // Продолжаем без критической ошибки
-                    } else {
-                        throw new Error('Поле пароля не найдено никаким способом');
-                    }
-                } else {
-                    this.log('✅ Найдено поле пароля в модальном окне');
-                
-                    // Вводим пароль ПОСИМВОЛЬНО (как в Python)
-                    this.log('🔒 Ввожу пароль...');
-                    
-                    // Делаем поле видимым и активным
-                    await passwordElement.evaluate(el => {
-                        el.scrollIntoView({ block: 'center' });
-                    });
-                    await this.delay(0.5, 0.5);
-                    
-                    // Фокусируемся и очищаем
-                    await passwordElement.focus();
-                    await this.delay(0.3, 0.3);
-                    
-                    await passwordElement.evaluate(el => el.value = '');
-                    await this.delay(0.2, 0.2);
-                    
-                    // Вводим ПОСИМВОЛЬНО с задержками
-                    for (const char of this.password) {
-                        await passwordElement.type(char, { delay: Math.random() * 100 + 50 });
-                    }
-                    
-                    await this.delay(0.5, 1);
-                    this.log('✅ Пароль введён посимвольно');
+                const codeElement = codeInput.asElement();
+                if (!codeElement) {
+                    throw new Error('Поле для ввода кода не найдено');
                 }
                 
+                this.log('✅ Найдено поле для ввода кода');
+                
+                // Делаем поле видимым и активным
+                await codeElement.evaluate(el => {
+                    el.scrollIntoView({ block: 'center' });
+                });
+                await this.delay(0.5, 0.5);
+                
+                // Фокусируемся и очищаем
+                await codeElement.focus();
+                await this.delay(0.3, 0.3);
+                
+                await codeElement.evaluate(el => el.value = '');
+                await this.delay(0.2, 0.2);
+                
+                // Вводим код ПОСИМВОЛЬНО с задержками
+                this.log('🔢 Ввожу код подтверждения...');
+                for (const char of code) {
+                    await codeElement.type(char, { delay: Math.random() * 100 + 50 });
+                }
+                
+                await this.delay(0.5, 1);
+                this.log('✅ Код введён посимвольно');
+                
             } catch (e) {
-                this.log(`❌ Ошибка ввода пароля: ${e.message}`, 'error');
-                await this.page.screenshot({ path: 'password_input_error.png' });
+                this.log(`❌ Ошибка ввода кода: ${e.message}`, 'error');
+                await this.page.screenshot({ path: 'code_input_error.png' });
                 throw e;
             }
 
-            // Нажимаем финальную кнопку "Продолжить" ВНУТРИ модального окна
-            this.log('🔘 Ищу и нажимаю финальную кнопку "Продолжить"...');
+            // Проверяем есть ли финальная кнопка подтверждения (обычно авторизация происходит автоматически)
+            this.log('🔘 Проверяю наличие финальной кнопки подтверждения...');
             
-            // Делаем скриншот ПЕРЕД нажатием
-            await this.page.screenshot({ path: 'before_final_continue.png' });
-            this.log('📸 Скриншот перед нажатием: before_final_continue.png');
+            await this.delay(2, 3); // Даем время на автоматическую авторизацию
             
-            const clickedFinalContinue = await this.page.evaluate(() => {
+            // Делаем скриншот
+            await this.page.screenshot({ path: 'before_final_submit.png' });
+            this.log('📸 Скриншот: before_final_submit.png');
+            
+            const clickedFinalSubmit = await this.page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"]') || 
                              document.querySelector('.modal') || 
                              document.querySelector('[class*="Modal"]');
                              
                 if (modal) {
                     const buttons = Array.from(modal.querySelectorAll('button'));
-                    console.log(`Найдено ${buttons.length} кнопок в модальном окне`);
                     
-                    buttons.forEach((btn, i) => {
-                        console.log(`Кнопка ${i + 1}: "${btn.textContent.trim()}", type="${btn.type}"`);
-                    });
-                    
-                    const continueBtn = buttons.find(btn => 
+                    const submitBtn = buttons.find(btn => 
                         btn.textContent.includes('Продолжить') || 
-                        btn.textContent.includes('продолжить') ||
+                        btn.textContent.includes('Войти') ||
+                        btn.textContent.includes('Подтвердить') ||
                         btn.type === 'submit'
                     );
                     
-                    if (continueBtn) {
-                        console.log(`Нажимаю кнопку: "${continueBtn.textContent.trim()}"`);
-                        continueBtn.click();
+                    if (submitBtn) {
+                        submitBtn.click();
                         return true;
                     }
-                    console.error('Кнопка "Продолжить" не найдена!');
                 }
                 return false;
             });
             
-            if (!clickedFinalContinue) {
-                this.log('⚠️ Кнопка "Продолжить" не найдена - возможно модалка закрылась автоматически', 'warning');
-                await this.page.screenshot({ path: 'final_continue_not_found.png' });
-                // НЕ выбрасываем ошибку - продолжаем, т.к. модалка могла закрыться сама
+            if (!clickedFinalSubmit) {
+                this.log('ℹ️  Финальная кнопка не найдена - возможно авторизация произошла автоматически', 'warning');
             } else {
-                this.log('✅ Кнопка "Продолжить" нажата!');
+                this.log('✅ Финальная кнопка нажата!');
             }
             
             this.log('⏳ Жду закрытия модального окна и завершения авторизации...');
@@ -1180,16 +1079,22 @@ class CianMailer {
             }
         }
 
-        this.log('❌ Не удалось закрыть iframe чата — обновляю страницу', 'error');
-        try {
-            await this.page.reload({ waitUntil: 'networkidle2', timeout: 0 });
-            await this.delay(3, 5);
-            this.log('🔄 Страница перезагружена после неуспешного закрытия iframe');
-            return true;
-        } catch (reloadError) {
-            this.log(`❌ Ошибка перезагрузки страницы: ${reloadError.message}`, 'error');
+        const forceRemoved = await this.page.evaluate(selector => {
+            const iframe = document.querySelector(selector);
+            if (iframe && iframe.parentElement) {
+                iframe.parentElement.remove();
+                return true;
+            }
             return false;
+        }, iframeSelector);
+
+        if (forceRemoved) {
+            this.log('⚠️ Пришлось принудительно удалить iframe из DOM', 'warning');
+            return true;
         }
+
+        this.log('❌ Не удалось закрыть iframe чата', 'error');
+        return false;
     }
 
     async processPage(pageNum) {
@@ -1467,18 +1372,13 @@ class CianMailer {
 
                     // Закрываем окно
                     this.log('Закрываю окно...');
-                    let chatClosed = false;
                     try {
                         await messageField.press('Escape');
                     } catch (pressError) {
                         await this.page.keyboard.press('Escape');
                     }
                     await this.delay(0.8, 1.2);
-                    chatClosed = await this.ensureChatClosed(frame);
-                    if (!chatClosed) {
-                        this.log('⏭️  Перехожу к следующему объявлению после перезагрузки страницы', 'warning');
-                        continue;
-                    }
+                    await this.ensureChatClosed(frame);
 
                     processed++;
 

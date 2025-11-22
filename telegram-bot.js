@@ -13,8 +13,9 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
     process.exit(1);
 }
 
-if (!process.env.CIAN_EMAIL || !process.env.CIAN_PASSWORD) {
-    console.error('❌ ОШИБКА: Не указаны CIAN_EMAIL или CIAN_PASSWORD в .env файле');
+if (!process.env.CIAN_PHONE) {
+    console.error('❌ ОШИБКА: Не указан CIAN_PHONE в .env файле');
+    console.error('   Формат: CIAN_PHONE=9771234567 (10 цифр без +7 или 8)');
     process.exit(1);
 }
 
@@ -118,15 +119,44 @@ bot.on('message', async (msg) => {
         isRunning = true;
         
         try {
+            // Создаем Promise для получения кода от пользователя
+            let codeResolver = null;
+            const codePromise = new Promise((resolve) => {
+                codeResolver = resolve;
+            });
+            
             // Создаем экземпляр CianMailer
             currentMailer = new CianMailer({
-                email: process.env.CIAN_EMAIL,
-                password: process.env.CIAN_PASSWORD,
+                phone: process.env.CIAN_PHONE,
                 maxPages: parseInt(process.env.MAX_PAGES || '5'),
                 maxPerPage: parseInt(process.env.MAX_PER_PAGE || '10'),
                 minPause: parseInt(process.env.MIN_PAUSE || '15'),
-                maxPause: parseInt(process.env.MAX_PAUSE || '25')
+                maxPause: parseInt(process.env.MAX_PAUSE || '25'),
+                // Callback для запроса кода авторизации
+                onCodeRequest: async () => {
+                    bot.sendMessage(chatId, '📲 **КОД ПОДТВЕРЖДЕНИЯ**\n\nНа ваш номер отправлен код. Пожалуйста, введите код из SMS:', { parse_mode: 'Markdown' });
+                    
+                    // Ждем когда пользователь введет код
+                    const code = await codePromise;
+                    return code;
+                }
             });
+            
+            // Обработчик для получения кода от пользователя (временный)
+            const codeHandler = (msg) => {
+                if (msg.chat.id === chatId && userId === msg.from.id) {
+                    const text = msg.text;
+                    // Проверяем что это похоже на код (4-6 цифр)
+                    if (/^\d{4,6}$/.test(text)) {
+                        bot.sendMessage(chatId, `✅ Код получен: ${text}\n\nПродолжаю авторизацию...`);
+                        codeResolver(text);
+                        bot.removeListener('message', codeHandler); // Удаляем обработчик
+                    }
+                }
+            };
+            
+            // Добавляем временный обработчик для получения кода
+            bot.on('message', codeHandler);
             
             // Переопределяем метод log для отправки сообщений в Telegram
             const originalLog = currentMailer.log.bind(currentMailer);
@@ -227,10 +257,13 @@ ${isRunning ? '🟢 Статус: **Рассылка активна**' : '🔴 �
     
     // Кнопка "Настройки"
     else if (text === '⚙️ Настройки') {
+        const phone = process.env.CIAN_PHONE || '';
+        const maskedPhone = phone ? `+7 (${phone.substring(0, 3)}) ***-**-${phone.substring(8, 10)}` : 'не указан';
+        
         const settingsMessage = `
 ⚙️ **ТЕКУЩИЕ НАСТРОЙКИ**
 
-📧 Email: \`${process.env.CIAN_EMAIL}\`
+📱 Телефон: \`${maskedPhone}\`
 📄 Макс. страниц: **${process.env.MAX_PAGES || '5'}**
 📨 Макс. объявлений/страницу: **${process.env.MAX_PER_PAGE || '10'}**
 ⏱️ Пауза между объявлениями: **${process.env.MIN_PAUSE || '15'}-${process.env.MAX_PAUSE || '25'} сек**
@@ -288,7 +321,9 @@ bot.on('polling_error', (error) => {
 
 // Запуск бота
 console.log('🤖 Telegram бот запущен...');
-console.log(`📧 CIAN Email: ${process.env.CIAN_EMAIL}`);
+const phone = process.env.CIAN_PHONE || '';
+const maskedPhone = phone ? `+7 (${phone.substring(0, 3)}) ***-**-${phone.substring(8, 10)}` : 'не указан';
+console.log(`📱 CIAN Телефон: ${maskedPhone}`);
 console.log(`🔑 Admin ID: ${adminId || 'Не задан (разрешено всем)'}`);
 console.log('✅ Ожидаю команды...\n');
 
