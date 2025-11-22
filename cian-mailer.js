@@ -1234,8 +1234,7 @@ class CianMailer {
                         if (existingMessages.length > 3) { // Больше 3 элементов = есть история (как в Python)
                             this.log(`⏭️  ДИАЛОГ УЖЕ СУЩЕСТВУЕТ (${existingMessages.length} сообщений) - пропускаю!`, 'warning');
                             await this.saveProcessedId(btnData.adId);
-                            await this.page.keyboard.press('Escape');
-                            await this.delay(1, 2);
+                            // НЕ закрываем iframe - просто переходим к следующему
                             continue;
                         }
                     } catch (e) {
@@ -1253,8 +1252,7 @@ class CianMailer {
                         if (!messageFieldData) {
                             this.log('❌ Поле ввода не найдено внутри iframe!', 'error');
                             await this.page.screenshot({ path: `no_textarea_${btnData.adId}.png` });
-                            await this.page.keyboard.press('Escape');
-                            await this.delay(1, 2);
+                            // Пропускаем без закрытия iframe
                             continue;
                         }
                         
@@ -1272,8 +1270,7 @@ class CianMailer {
                         
                         if (!fieldInfo.isVisible || !fieldInfo.isEnabled) {
                             this.log('❌ Поле не готово к вводу!', 'error');
-                            await this.page.keyboard.press('Escape');
-                            await this.delay(1, 2);
+                            // Пропускаем без закрытия iframe
                             continue;
                         }
                         
@@ -1282,8 +1279,7 @@ class CianMailer {
                     } catch (e) {
                         this.log(`❌ Ошибка при поиске поля ввода: ${e.message}`, 'error');
                         await this.page.screenshot({ path: `textarea_error_${Date.now()}.png` });
-                        await this.page.keyboard.press('Escape');
-                        await this.delay(1, 2);
+                        // Пропускаем без закрытия iframe
                         continue;
                     }
                     
@@ -1295,8 +1291,7 @@ class CianMailer {
                     const inputFilled = await this.fillMessageField(frame, messageField, messageText, fieldInfo);
                     if (!inputFilled) {
                         this.log('❌ Не удалось ввести текст сообщения', 'error');
-                        await this.page.keyboard.press('Escape');
-                        await this.delay(1, 2);
+                        // Пропускаем без закрытия iframe
                         continue;
                     }
                     
@@ -1306,8 +1301,7 @@ class CianMailer {
                     const sendSuccess = await this.clickSendButton(frame);
                     if (!sendSuccess) {
                         this.log('❌ Не удалось нажать кнопку отправки, пропускаю объявление', 'error');
-                        await this.page.keyboard.press('Escape');
-                        await this.delay(1, 2);
+                        // Пропускаем без закрытия iframe
                         continue;
                     }
 
@@ -1341,19 +1335,12 @@ class CianMailer {
                         price: btnData.price
                     });
 
-                    // Закрываем окно
-                    this.log('Закрываю окно...');
-                    try {
-                        await messageField.press('Escape');
-                    } catch (pressError) {
-                        await this.page.keyboard.press('Escape');
-                    }
-                    await this.delay(0.8, 1.2);
-                    await this.ensureChatClosed(frame);
-
+                    // НЕ закрываем iframe - просто переходим к следующему объявлению
+                    this.log('Перехожу к следующему объявлению (iframe остаётся открытым)...');
+                    
                     processed++;
 
-                    // Пауза между объявлениями
+                    // Минимальная пауза между объявлениями (для стабильности)
                     if (i < buttonsToProcess.length - 1) {
                         const pause = Math.random() * (this.maxPause - this.minPause) + this.minPause;
                         this.log(`⏸️ Пауза ${pause.toFixed(1)} сек...`);
@@ -1369,10 +1356,7 @@ class CianMailer {
                         this.log(`Скриншот ошибки сохранен: error_ad_${btnData.adId}_${Date.now()}.png`);
                     } catch (e) {}
                     
-                    // Пытаемся закрыть окно в случае ошибки
-                    try {
-                        await this.page.keyboard.press('Escape');
-                    } catch (e) {}
+                    // НЕ закрываем iframe, просто продолжаем к следующему объявлению
                     continue;
                 }
             }
