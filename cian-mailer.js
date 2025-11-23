@@ -14,8 +14,8 @@ puppeteer.use(StealthPlugin());
 class CianMailer {
     constructor(config = {}) {
         this.phone = config.phone;
-        this.maxPages = config.maxPages || 5;
-        this.maxPerPage = config.maxPerPage || 10;
+        this.maxPages = config.maxPages || 10;
+        this.maxPerPage = config.maxPerPage || 10; // НЕ ИСПОЛЬЗУЕТСЯ - обрабатываются ВСЕ объявления на странице
         this.minPause = config.minPause || 4;
         this.maxPause = config.maxPause || 10;
         
@@ -31,13 +31,30 @@ class CianMailer {
         // Callback для получения кода авторизации от Telegram бота
         this.onCodeRequest = config.onCodeRequest || null;
         
-        this.messageVariants = [
-            `Здравствуйте!
-
-`
-        ];
+        // Варианты сообщений (передаются из конфига или будут дефолтными)
+        this.messageVariants = config.messageVariants || [];
 
         this.captchaApiKey = config.captchaApiKey || process.env.CAPTCHA_API_KEY || null;
+
+        this.rektCaptcha = {
+            extensionPath: config.rektCaptchaExtensionPath
+                ? path.resolve(config.rektCaptchaExtensionPath)
+                : null,
+            popupPage: config.rektCaptchaPopup || 'popup.html',
+            autoConfigure: config.rektCaptchaAutoConfigure !== false,
+            autoOpen: config.rektCaptchaAutoOpen !== false,
+            autoSolve: config.rektCaptchaAutoSolve !== false,
+            clickDelay: typeof config.rektCaptchaClickDelay === 'number'
+                ? config.rektCaptchaClickDelay
+                : 300,
+            solveDelay: typeof config.rektCaptchaSolveDelay === 'number'
+                ? config.rektCaptchaSolveDelay
+                : 1000,
+            profileDir: config.rektCaptchaProfileDir
+                ? path.resolve(config.rektCaptchaProfileDir)
+                : path.resolve(__dirname, 'chrome_profile_rektcaptcha'),
+            extensionId: null
+        };
     }
 
     async getWriteButtonFromCard(card) {
@@ -128,6 +145,22 @@ class CianMailer {
             
             // Путь к Google Chrome на macOS
             const chromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+            let extensionPathToUse = null;
+
+            if (this.rektCaptcha?.extensionPath) {
+                if (fsSync.existsSync(this.rektCaptcha.extensionPath)) {
+                    extensionPathToUse = this.rektCaptcha.extensionPath;
+                    try {
+                        fsSync.mkdirSync(this.rektCaptcha.profileDir, { recursive: true });
+                    } catch (profileError) {
+                        this.log(`Ошибка создания каталога профиля Chrome: ${profileError.message}`, 'warning');
+                    }
+                } else {
+                    this.log(`Указанный путь к расширению rektCaptcha не найден: ${this.rektCaptcha.extensionPath}`, 'warning');
+                    this.rektCaptcha.extensionPath = null;
+                    this.rektCaptcha.autoConfigure = false;
+                }
+            }
             
             // Проверяем наличие Chrome
             let browserPath = undefined;
@@ -138,31 +171,46 @@ class CianMailer {
                 this.log('⚠️ Google Chrome не найден, использую встроенный Chromium', 'warning');
             }
             
-            this.browser = await puppeteer.launch({
-                headless: false, // Показываем браузер
-                executablePath: browserPath, // Используем Chrome если найден, иначе Chromium
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--disable-web-security',
-                    '--lang=ru-RU,ru',
-                    '--window-size=4010,2610',
-                    '--window-position=0,0'
-                ],
-                defaultViewport: {
-                    width: 4010,
-                    height: 2610
-                }
-            });
+            const launchArgs = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--lang=ru-RU,ru',
+                '--window-size=2560,1440',
+                '--window-position=0,0',
+                '--start-maximized'
+            ];
+
+            if (extensionPathToUse) {
+                launchArgs.push(`--disable-extensions-except=${extensionPathToUse}`);
+                launchArgs.push(`--load-extension=${extensionPathToUse}`);
+            }
+
+            const launchOptions = {
+                headless: false,
+                executablePath: browserPath,
+                args: launchArgs
+            };
+
+            if (extensionPathToUse) {
+                launchOptions.userDataDir = this.rektCaptcha.profileDir;
+            }
+
+            this.browser = await puppeteer.launch(launchOptions);
 
             this.page = await this.browser.newPage();
             
-            // Устанавливаем фиксированный размер окна
-            await this.page.setViewport({
-                width: 4010,
-                height: 2610
+            // Устанавливаем размер окна как на большом мониторе (2560x1440 - QHD)
+            // await this.page.setViewport({
+            //     width: 2560,
+            //     height: 1440
+            // }); 
+            
+            // Устанавливаем масштаб страницы (zoom) - 75% (как будто пользователь нажал Ctrl"-")
+            await this.page.evaluate(() => {
+                document.body.style.zoom = '0.6'; // 75% от обычного размера
             });
             
             // Скрываем факт автоматизации
@@ -170,12 +218,191 @@ class CianMailer {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+                
+                // Устанавливаем zoom для всех страниц
+                document.addEventListener('DOMContentLoaded', () => {
+                    document.body.style.zoom = '0.75';
+                });
             });
 
             this.log('Браузер успешно запущен', 'success');
+
+            if (extensionPathToUse && this.rektCaptcha.autoConfigure) {
+                await this.configureRektCaptchaExtension();
+            }
             return true;
         } catch (error) {
             this.log(`Ошибка запуска браузера: ${error.message}`, 'error');
+            return false;
+        }
+    }
+
+    async getRektCaptchaExtensionId() {
+        if (!this.browser || !this.rektCaptcha?.extensionPath) {
+            return null;
+        }
+        if (this.rektCaptcha.extensionId) {
+            return this.rektCaptcha.extensionId;
+        }
+
+        const extractId = target => {
+            if (!target || typeof target.url !== 'function') {
+                return null;
+            }
+            const url = target.url();
+            if (!url || !url.startsWith('chrome-extension://')) {
+                return null;
+            }
+            const match = url.match(/chrome-extension:\/\/([^/]+)\//);
+            return match ? match[1] : null;
+        };
+
+        const currentTargets = this.browser.targets();
+        for (const target of currentTargets) {
+            if (!['background_page', 'service_worker', 'page'].includes(target.type())) {
+                continue;
+            }
+            const id = extractId(target);
+            if (id) {
+                this.rektCaptcha.extensionId = id;
+                return id;
+            }
+        }
+
+        try {
+            const awaitedTarget = await this.browser.waitForTarget(candidate => {
+                if (!['background_page', 'service_worker', 'page'].includes(candidate.type())) {
+                    return false;
+                }
+                return extractId(candidate) !== null;
+            }, { timeout: 5000 });
+            const awaitedId = extractId(awaitedTarget);
+            if (awaitedId) {
+                this.rektCaptcha.extensionId = awaitedId;
+                return awaitedId;
+            }
+        } catch (error) {
+            // Игнорируем таймаут поиска extensionId
+        }
+
+        return null;
+    }
+
+    async configureRektCaptchaExtension() {
+        if (!this.browser || !this.rektCaptcha?.extensionPath) {
+            return false;
+        }
+
+        try {
+            const extensionId = await this.getRektCaptchaExtensionId();
+            if (!extensionId) {
+                this.log('Не удалось определить ID расширения rektCaptcha', 'warning');
+                return false;
+            }
+
+            const normalize = pageName => (pageName || '').replace(/^\/+/, '');
+            const candidatePages = [
+                normalize(this.rektCaptcha.popupPage),
+                'popup.html',
+                'options.html',
+                'index.html'
+            ].filter(Boolean);
+
+            const triedPages = new Set();
+            let extensionPage = null;
+            let openedUrl = null;
+
+            try {
+                for (const pageName of candidatePages) {
+                    if (triedPages.has(pageName)) {
+                        continue;
+                    }
+                    triedPages.add(pageName);
+                    const url = `chrome-extension://${extensionId}/${pageName}`;
+                    const page = await this.browser.newPage();
+                    try {
+                        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 5000 });
+                        extensionPage = page;
+                        openedUrl = url;
+                        break;
+                    } catch (navigationError) {
+                        await page.close().catch(() => {});
+                    }
+                }
+
+                if (!extensionPage) {
+                    this.log('Не удалось открыть страницу настроек rektCaptcha', 'warning');
+                    return false;
+                }
+
+                this.log(`Настраиваю rektCaptcha через ${openedUrl}`);
+                const settingsPayload = {
+                    autoOpen: !!this.rektCaptcha.autoOpen,
+                    autoSolve: !!this.rektCaptcha.autoSolve,
+                    clickDelay: String(this.rektCaptcha.clickDelay ?? ''),
+                    solveDelay: String(this.rektCaptcha.solveDelay ?? '')
+                };
+
+                const result = await extensionPage.evaluate(settings => {
+                    const ensureToggle = (selector, shouldBeOn) => {
+                        const el = document.querySelector(selector);
+                        if (!el) {
+                            return false;
+                        }
+                        const isOn = el.classList.contains('on');
+                        if (shouldBeOn && !isOn) {
+                            el.click();
+                        }
+                        if (!shouldBeOn && isOn) {
+                            el.click();
+                        }
+                        return true;
+                    };
+
+                    const ensureInput = (selector, value) => {
+                        const input = document.querySelector(selector);
+                        if (!input) {
+                            return false;
+                        }
+                        input.focus();
+                        input.value = '';
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.value = value;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    };
+
+                    return {
+                        autoOpenApplied: ensureToggle('.settings_toggle[data-settings="recaptcha_auto_open"]', settings.autoOpen),
+                        autoSolveApplied: ensureToggle('.settings_toggle[data-settings="recaptcha_auto_solve"]', settings.autoSolve),
+                        clickDelayApplied: ensureInput('input[data-settings="recaptcha_click_delay_time"]', settings.clickDelay),
+                        solveDelayApplied: ensureInput('input[data-settings="recaptcha_solve_delay_time"]', settings.solveDelay)
+                    };
+                }, settingsPayload);
+
+                await extensionPage.waitForTimeout(400);
+
+                const issues = [];
+                if (!result.autoOpenApplied) issues.push('auto-open');
+                if (!result.autoSolveApplied) issues.push('auto-solve');
+                if (!result.clickDelayApplied) issues.push('click delay');
+                if (!result.solveDelayApplied) issues.push('solve delay');
+
+                if (issues.length) {
+                    this.log(`Не удалось настроить элементы rektCaptcha: ${issues.join(', ')}`, 'warning');
+                } else {
+                    this.log('Настройки rektCaptcha обновлены', 'success');
+                }
+
+                return true;
+            } finally {
+                if (extensionPage) {
+                    await extensionPage.close().catch(() => {});
+                }
+            }
+        } catch (error) {
+            this.log(`Ошибка настройки rektCaptcha: ${error.message}`, 'warning');
             return false;
         }
     }
@@ -185,6 +412,12 @@ class CianMailer {
             this.log('🔐 Начинаем авторизацию на CIAN по номеру телефона...');
             
             await this.page.goto('https://www.cian.ru/', { waitUntil: 'networkidle2' });
+            
+            // Устанавливаем zoom на странице
+            await this.page.evaluate(() => {
+                document.body.style.zoom = '0.75';
+            });
+            
             await this.delay(2, 4);
 
             // Кликаем на кнопку "Войти"
@@ -532,6 +765,11 @@ class CianMailer {
         try {
             this.log('🔧 Применение фильтров через UI...');
 
+            // Устанавливаем zoom на странице
+            await this.page.evaluate(() => {
+                document.body.style.zoom = '0.75';
+            });
+
             // Ждем и кликаем "Ещё фильтры"
             this.log('Ищу кнопку "Ещё фильтры"...');
             await this.delay(2, 3); // Даем странице загрузиться
@@ -755,6 +993,48 @@ class CianMailer {
         }
     }
 
+    async waitRecaptchaSolved() {
+        this.log("⏳ Жду прохождения reCAPTCHA...");
+    
+        try {
+            // Находим iframe с капчей
+            const iframeHandle = await this.page.waitForSelector(
+                'iframe[src*="recaptcha"]',
+                { timeout: 20000 }
+            );
+    
+            const frame = await iframeHandle.contentFrame();
+            if (!frame) {
+                this.log("❌ Не удалось получить frame reCAPTCHA", 'error');
+                return false;
+            }
+    
+            // Ждем появления чекбокса
+            await frame.waitForSelector('.recaptcha-checkbox-checkmark', {
+                visible: true,
+                timeout: 20000
+            });
+    
+            // Ожидаем, что чекбокс станет "пройден"
+            await frame.waitForFunction(() => {
+                const box = document.querySelector('.recaptcha-checkbox-checkmark');
+                const container = document.querySelector('.recaptcha-checkbox');
+                return (
+                    (box && box.offsetParent !== null) ||
+                    (container && container.classList.contains('recaptcha-checkbox-checked'))
+                );
+            }, { timeout: 20000 });
+    
+            this.log("✅ reCAPTCHA пройдена!");
+            return true;
+    
+        } catch (err) {
+            this.log("❌ Ошибка ожидания reCAPTCHA: " + err.message, 'error');
+            return false;
+        }
+    }
+    
+
     async solveCaptcha(frame, pageUrl) {
         if (!this.captchaApiKey) {
             this.log('CAPTCHA_API_KEY не задан, пропускаю решение капчи', 'warning');
@@ -832,54 +1112,52 @@ class CianMailer {
 
     async clickSendButton(frame) {
         try {
-            let sendButton = await frame.$('[data-testid="send_button"], [data-name="MessageInputField_send_button"], button[class*="MessageInputField_send_button"], button[type="submit"]');
+            // Используем evaluate для поиска и клика по кнопке (работает даже с zoom)
+            const clicked = await frame.evaluate(() => {
+                const selectors = [
+                    '[data-testid="send_button"]',
+                    '[data-name="MessageInputField_send_button"]',
+                    'button[class*="MessageInputField_send_button"]',
+                    'button[type="submit"]'
+                ];
 
-            if (!sendButton) {
-                const handle = await frame.evaluateHandle(() => {
-                    const selectors = [
-                        '[data-testid="send_button"]',
-                        '[data-name="MessageInputField_send_button"]',
-                        'button[class*="MessageInputField_send_button"]',
-                        'button[type="submit"]'
-                    ];
-
-                    for (const selector of selectors) {
-                        const btn = document.querySelector(selector);
-                        if (btn) return btn;
-                    }
-
-                    const fallback = Array.from(document.querySelectorAll('button')).find(btn => {
-                        const text = (btn.textContent || '').toLowerCase();
-                        return text.includes('отправить') || text.includes('send');
-                    });
-
-                    return fallback || null;
-                });
-
-                if (handle) {
-                    const element = handle.asElement();
-                    if (element) {
-                        sendButton = element;
-                    } else {
-                        await handle.dispose();
+                // Пробуем найти по селекторам
+                for (const selector of selectors) {
+                    const btn = document.querySelector(selector);
+                    if (btn) {
+                        btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+                        btn.click();
+                        return true;
                     }
                 }
-            }
 
-            if (!sendButton) {
+                // Fallback: ищем по тексту
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const sendBtn = buttons.find(btn => {
+                    const text = (btn.textContent || '').toLowerCase();
+                    return text.includes('отправить') || text.includes('send');
+                });
+
+                if (sendBtn) {
+                    sendBtn.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    sendBtn.click();
+                    return true;
+                }
+
+                return false;
+            });
+
+            if (!clicked) {
                 this.log('❌ Кнопка "Отправить" не найдена', 'error');
                 return false;
             }
 
-            await frame.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }), sendButton);
-            await this.delay(0.2, 0.4);
-            await sendButton.click();
             this.log('📨 Нажал кнопку "Отправить"', 'success');
             await this.delay(5, 8);
 
             return true;
         } catch (error) {
-            this.log(`Ошибка при нажатии кнопки "Отправить": ${error.message}`, 'error');
+            this.log(`❌ Ошибка при нажатии кнопки "Отправить": ${error.message}`, 'error');
             return false;
         }
     }
@@ -1080,11 +1358,12 @@ class CianMailer {
                 }
             }
 
-            const buttonsToProcess = uniqueButtons.slice(0, this.maxPerPage);
+            // Обрабатываем ВСЕ найденные объявления на странице (не ограничиваем maxPerPage)
+            const buttonsToProcess = uniqueButtons;
             this.log(`\n📊 Статистика:`);
             this.log(`   • Всего найдено: ${buttonsData.length}`);
             this.log(`   • Уникальных: ${uniqueButtons.length}`);
-            this.log(`   • Будет обработано: ${buttonsToProcess.length} (макс. ${this.maxPerPage})\n`);
+            this.log(`   • Будет обработано: ${buttonsToProcess.length} (ВСЕ объявления на странице)\n`);
 
             if (buttonsToProcess.length === 0) {
                 this.log('⚠️ НЕТ ОБЪЯВЛЕНИЙ ДЛЯ ОБРАБОТКИ НА ЭТОЙ СТРАНИЦЕ!', 'warning');
@@ -1330,7 +1609,7 @@ class CianMailer {
                     }
 
                     this.log('⏸️  Пауза 10 сек — проверь визуально текст в чате');
-                    await this.delay(30, 30);
+                    await this.delay(15, 15);
                     this.log('✉️  Повторно нажимаю "Отправить" для надёжности');
                     await this.clickSendButton(frame);
 
@@ -1352,7 +1631,7 @@ class CianMailer {
 
                     // Минимальная пауза между объявлениями (для стабильности)
                     if (i < buttonsToProcess.length - 1) {
-                        const pause = Math.random() * (this.maxPause - this.minPause) + this.minPause;
+                        const pause = Math.random() * (3 - 1) + 1; // 1-3 секунды
                         this.log(`⏸️ Пауза ${pause.toFixed(1)} сек...`);
                         await this.delay(pause, pause);
                     }
@@ -1390,11 +1669,27 @@ class CianMailer {
             if (!loginSuccess) {
                 this.log('❌ АВТОРИЗАЦИЯ НЕ УДАЛАСЬ!', 'error');
                 this.log('📸 Проверьте скриншоты: auth_failed.png или auth_not_logged_in.png');
-                throw new Error('Не удалось авторизоваться - проверьте email/пароль в .env');
+                throw new Error('Не удалось авторизоваться - проверьте номер телефона');
             }
             
-            this.log('✅ Авторизация подтверждена, продолжаем работу');
+            this.log('✅ Авторизация подтверждена!');
+            
+            // Проверяем наличие вариантов сообщений
+            if (!this.messageVariants || this.messageVariants.length === 0) {
+                this.log('⚠️ Варианты сообщений не заданы, используются дефолтные');
+                this.messageVariants = [
+                    'Здравствуйте! Интересует ваше объявление.',
+                    'Добрый день! Хотел бы узнать подробнее о вашем объявлении.',
+                    'Здравствуйте! Можно уточнить детали по объявлению?'
+                ];
+            } else {
+                this.log(`✅ Используются ${this.messageVariants.length} вариантов сообщений из конфига`);
+            }
+            
             await this.delay(2, 3);
+
+
+            
 
             // Открываем страницу поиска
             const baseUrl = 'https://www.cian.ru/cat.php?deal_type=sale&offer_type=flat&region=1';
@@ -1431,7 +1726,7 @@ class CianMailer {
 
                 // Пауза между страницами
                 if (page < this.maxPages) {
-                    const pause = Math.random() * (75 - 45) + 45;
+                    const pause = Math.random() * (10 - 5) + 5;
                     this.log(`⏸️ Пауза ${pause.toFixed(1)} сек перед следующей страницей...`);
                     await this.delay(pause, pause);
                 }
