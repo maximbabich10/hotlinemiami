@@ -252,20 +252,21 @@ bot.on('message', async (msg) => {
             
             try {
                 await db.registerUser(userId, text);
-                userStates.delete(userId);
                 
                 const successMessage = `
 ✅ **РЕГИСТРАЦИЯ ЗАВЕРШЕНА!**
 
 Ваш номер телефона сохранен: \`+7${text}\`
 
-Теперь вы можете использовать бота для рассылки на CIAN.
+Теперь настройте варианты сообщений для рассылки.
 
-При запуске рассылки бот автоматически авторизуется под вашим аккаунтом.
-
-Нажмите **▶️ Запустить рассылку** для начала работы.
+📝 Отправьте **первый вариант** сообщения:
 `;
-                bot.sendMessage(chatId, successMessage, { parse_mode: 'Markdown', ...mainKeyboard });
+                bot.sendMessage(chatId, successMessage, { parse_mode: 'Markdown', ...cancelKeyboard });
+                
+                // Переходим к запросу вариантов сообщений
+                userStates.set(userId, { step: 'awaiting_message_1', messages: [] });
+                
                 log(`Пользователь ${userId} успешно зарегистрирован с номером ${text}`, userId);
             } catch (error) {
                 log(`Ошибка сохранения пользователя: ${error.message}`, userId);
@@ -295,6 +296,37 @@ bot.on('message', async (msg) => {
             }
             return;
         }
+        
+        // Ожидание вариантов сообщений
+        if (state.step === 'awaiting_message_1') {
+            state.messages = [text];
+            state.step = 'awaiting_message_2';
+            userStates.set(userId, state);
+            bot.sendMessage(chatId, `✅ Первый вариант получен!\n\nОтправьте **второй вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
+            return;
+        }
+        
+        if (state.step === 'awaiting_message_2') {
+            state.messages.push(text);
+            state.step = 'awaiting_message_3';
+            userStates.set(userId, state);
+            bot.sendMessage(chatId, `✅ Второй вариант получен!\n\nОтправьте **третий вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
+            return;
+        }
+        
+        if (state.step === 'awaiting_message_3') {
+            state.messages.push(text);
+            const messages = state.messages;
+            
+            bot.sendMessage(chatId, `✅ Все 3 варианта получены!\n\n📝 **Ваши варианты сообщений:**\n\n**1.** ${messages[0].substring(0, 50)}...\n**2.** ${messages[1].substring(0, 50)}...\n**3.** ${messages[2].substring(0, 50)}...\n\n✅ Варианты сохранены! Теперь можете запустить рассылку.`, { parse_mode: 'Markdown', ...mainKeyboard });
+            
+            // Сохраняем варианты в состоянии пользователя (для использования при запуске)
+            state.step = 'messages_ready';
+            state.savedMessages = messages;
+            userStates.set(userId, state);
+            
+            return;
+        }
     }
     
     // Проверка авторизации для основных функций
@@ -309,6 +341,20 @@ bot.on('message', async (msg) => {
     if (text === '▶️ Запустить рассылку') {
         if (isRunning) {
             bot.sendMessage(chatId, '⚠️ Рассылка уже запущена!', mainKeyboard);
+            return;
+        }
+        
+        // Проверяем, есть ли сохраненные варианты сообщений
+        const state = userStates.get(userId);
+        if (!state || !state.savedMessages || state.savedMessages.length !== 3) {
+            // Если нет сохраненных вариантов - запрашиваем их
+            bot.sendMessage(chatId, `📝 **НАСТРОЙКА ВАРИАНТОВ СООБЩЕНИЙ**
+
+Перед запуском рассылки необходимо настроить 3 варианта сообщений.
+
+Отправьте **первый вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
+            
+            userStates.set(userId, { step: 'awaiting_message_1', messages: [] });
             return;
         }
         
@@ -328,13 +374,17 @@ bot.on('message', async (msg) => {
                 codeResolver = resolve;
             });
             
+            // Получаем сохраненные варианты сообщений
+            const savedMessages = state.savedMessages;
+            
             // Создаем экземпляр CianMailer с данными пользователя
             currentMailer = new CianMailer({
                 phone: user.phone_number,
-                maxPages: parseInt(process.env.MAX_PAGES || '5'),
+                maxPages: parseInt(process.env.MAX_PAGES || '10'),
                 maxPerPage: parseInt(process.env.MAX_PER_PAGE || '10'),
                 minPause: parseInt(process.env.MIN_PAUSE || '3'),
                 maxPause: parseInt(process.env.MAX_PAUSE || '5'),
+                messageVariants: savedMessages, // Передаем сохраненные варианты напрямую
                 // Callback для запроса кода авторизации
                 onCodeRequest: async () => {
                     bot.sendMessage(chatId, '📲 **КОД ПОДТВЕРЖДЕНИЯ**\n\nНа ваш номер отправлен код. Пожалуйста, введите код из SMS:', { parse_mode: 'Markdown' });
@@ -362,7 +412,7 @@ ID: \`${payload.adId}\`
                 }
             });
             
-            // Обработчик для получения кода от пользователя (временный)
+            // Обработчик для получения кода
             const codeHandler = (msg) => {
                 if (msg.chat.id === chatId && userId === msg.from.id) {
                     const text = msg.text;
