@@ -23,6 +23,42 @@ let isRunning = false;
 let currentMailer = null;
 const userStates = new Map(); // Хранит состояние регистрации пользователей
 
+const MESSAGE_VARIANTS_REQUIRED = 3;
+const MESSAGE_ORDINALS = ['первый', 'второй', 'третий', 'четвёртый', 'пятый'];
+
+function escapeMarkdown(text = '') {
+    return text
+        .replace(/_/g, '\\_')
+        .replace(/\*/g, '\\*')
+        .replace(/`/g, '\\`')
+        .replace(/\[/g, '\\[')
+        .replace(/]/g, '\\]')
+        .replace(/\(/g, '\\(')
+        .replace(/\)/g, '\\)')
+        .replace(/~/g, '\\~')
+        .replace(/>/g, '\\>')
+        .replace(/#/g, '\\#')
+        .replace(/\+/g, '\\+')
+        .replace(/-/g, '\\-')
+        .replace(/=/g, '\\=')
+        .replace(/\|/g, '\\|')
+        .replace(/{/g, '\\{')
+        .replace(/}/g, '\\}')
+        .replace(/\./g, '\\.')
+        .replace(/!/g, '\\!');
+}
+
+function formatMessagePreview(text = '', limit = 80) {
+    const trimmed = text.trim();
+    const safe = escapeMarkdown(trimmed);
+    return safe.length > limit ? `${safe.substring(0, limit - 1)}…` : safe;
+}
+
+function ordinalLabel(index) {
+    const ordinal = MESSAGE_ORDINALS[index - 1];
+    return ordinal ? ordinal : `${index}-й`;
+}
+
 // Клавиатура с кнопками
 const mainKeyboard = {
     reply_markup: {
@@ -242,6 +278,69 @@ bot.on('message', async (msg) => {
             return;
         }
         
+        // Сбор вариантов сообщений
+        if (state.step === 'collecting_messages') {
+            const maxVariants = state.expectedMessages || MESSAGE_VARIANTS_REQUIRED;
+            const currentMessages = Array.isArray(state.messages) ? [...state.messages] : [];
+
+            if (currentMessages.length >= maxVariants) {
+                bot.sendMessage(chatId, '⚠️ Все варианты уже получены. Если хотите начать заново, нажмите «❌ Отмена».', { ...cancelKeyboard });
+                return;
+            }
+
+            const candidates = text
+                .split('\n')
+                .map(part => part.trim())
+                .filter(part => part.length > 0);
+
+            if (candidates.length === 0) {
+                bot.sendMessage(chatId, '⚠️ Похоже, сообщение было пустым. Отправьте вариант ещё раз.', { parse_mode: 'Markdown', ...cancelKeyboard });
+                return;
+            }
+
+            const candidate = candidates[0];
+            const ignored = Math.max(0, candidates.length - 1);
+
+            currentMessages.push(candidate);
+            state.messages = currentMessages;
+            state.expectedMessages = maxVariants;
+
+            if (currentMessages.length >= maxVariants) {
+                const messages = currentMessages.slice(0, maxVariants);
+                state.savedMessages = messages;
+                state.step = 'messages_ready';
+                delete state.messages;
+                userStates.set(userId, state);
+
+                const preview = messages
+                    .map((msg, idx) => `**${idx + 1}.** ${formatMessagePreview(msg)}`)
+                    .join('\n');
+
+                let extraNotice = '';
+                if (ignored > 0) {
+                    extraNotice = `\n⚠️ Дополнительные строки в последнем сообщении проигнорированы. Отправляйте варианты отдельными сообщениями.`;
+                }
+
+                bot.sendMessage(chatId, `✅ Все ${maxVariants} варианта получены!\n\n📝 **Ваши варианты сообщений:**\n${preview}\n\n✅ Варианты сохранены! Теперь можете запустить рассылку.${extraNotice}`, { parse_mode: 'Markdown', ...mainKeyboard });
+                return;
+            }
+
+            userStates.set(userId, state);
+
+            const collected = currentMessages.length;
+            const nextIndex = collected + 1;
+            const label = ordinalLabel(nextIndex);
+            const remaining = maxVariants - collected;
+
+            let extraNotice = '';
+            if (ignored > 0) {
+                extraNotice = '\n⚠️ Дополнительные строки в сообщении проигнорированы. Каждое сообщение должно содержать только один вариант.';
+            }
+
+            bot.sendMessage(chatId, `✅ Получено вариантов: ${collected}/${maxVariants}.\n\nОтправьте **${label} вариант** сообщения.${extraNotice}`, { parse_mode: 'Markdown', ...cancelKeyboard });
+            return;
+        }
+        
         // Ожидание номера телефона при регистрации
         if (state.step === 'awaiting_phone') {
             // Валидация номера телефона
@@ -260,12 +359,17 @@ bot.on('message', async (msg) => {
 
 Теперь настройте варианты сообщений для рассылки.
 
-📝 Отправьте **первый вариант** сообщения:
+📝 Отправьте **первый вариант** сообщения.
+Можно сразу перечислить несколько вариантов в одном сообщении — просто разделите их переводом строки.
 `;
                 bot.sendMessage(chatId, successMessage, { parse_mode: 'Markdown', ...cancelKeyboard });
                 
                 // Переходим к запросу вариантов сообщений
-                userStates.set(userId, { step: 'awaiting_message_1', messages: [] });
+                userStates.set(userId, {
+                    step: 'collecting_messages',
+                    messages: [],
+                    expectedMessages: MESSAGE_VARIANTS_REQUIRED
+                });
                 
                 log(`Пользователь ${userId} успешно зарегистрирован с номером ${text}`, userId);
             } catch (error) {
@@ -296,37 +400,6 @@ bot.on('message', async (msg) => {
             }
             return;
         }
-        
-        // Ожидание вариантов сообщений
-        if (state.step === 'awaiting_message_1') {
-            state.messages = [text];
-            state.step = 'awaiting_message_2';
-            userStates.set(userId, state);
-            bot.sendMessage(chatId, `✅ Первый вариант получен!\n\nОтправьте **второй вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
-            return;
-        }
-        
-        if (state.step === 'awaiting_message_2') {
-            state.messages.push(text);
-            state.step = 'awaiting_message_3';
-            userStates.set(userId, state);
-            bot.sendMessage(chatId, `✅ Второй вариант получен!\n\nОтправьте **третий вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
-            return;
-        }
-        
-        if (state.step === 'awaiting_message_3') {
-            state.messages.push(text);
-            const messages = state.messages;
-            
-            bot.sendMessage(chatId, `✅ Все 3 варианта получены!\n\n📝 **Ваши варианты сообщений:**\n\n**1.** ${messages[0].substring(0, 50)}...\n**2.** ${messages[1].substring(0, 50)}...\n**3.** ${messages[2].substring(0, 50)}...\n\n✅ Варианты сохранены! Теперь можете запустить рассылку.`, { parse_mode: 'Markdown', ...mainKeyboard });
-            
-            // Сохраняем варианты в состоянии пользователя (для использования при запуске)
-            state.step = 'messages_ready';
-            state.savedMessages = messages;
-            userStates.set(userId, state);
-            
-            return;
-        }
     }
     
     // Проверка авторизации для основных функций
@@ -346,15 +419,20 @@ bot.on('message', async (msg) => {
         
         // Проверяем, есть ли сохраненные варианты сообщений
         const state = userStates.get(userId);
-        if (!state || !state.savedMessages || state.savedMessages.length !== 3) {
+        if (!state || !state.savedMessages || state.savedMessages.length !== MESSAGE_VARIANTS_REQUIRED) {
             // Если нет сохраненных вариантов - запрашиваем их
             bot.sendMessage(chatId, `📝 **НАСТРОЙКА ВАРИАНТОВ СООБЩЕНИЙ**
 
-Перед запуском рассылки необходимо настроить 3 варианта сообщений.
+Перед запуском рассылки необходимо настроить ${MESSAGE_VARIANTS_REQUIRED} варианта сообщений.
 
-Отправьте **первый вариант** сообщения:`, { parse_mode: 'Markdown', ...cancelKeyboard });
+Отправьте **первый вариант** сообщения.
+Можно перечислить несколько вариантов в одном сообщении — разделите их переводом строки.`, { parse_mode: 'Markdown', ...cancelKeyboard });
             
-            userStates.set(userId, { step: 'awaiting_message_1', messages: [] });
+            userStates.set(userId, {
+                step: 'collecting_messages',
+                messages: [],
+                expectedMessages: MESSAGE_VARIANTS_REQUIRED
+            });
             return;
         }
         
@@ -375,12 +453,14 @@ bot.on('message', async (msg) => {
             });
             
             // Получаем сохраненные варианты сообщений
-            const savedMessages = state.savedMessages;
+            const savedMessages = [...state.savedMessages];
+            const maxPagesValue = process.env.MAX_PAGES ? parseInt(process.env.MAX_PAGES, 10) : null;
+            const normalizedMaxPages = Number.isInteger(maxPagesValue) && maxPagesValue > 0 ? maxPagesValue : null;
             
             // Создаем экземпляр CianMailer с данными пользователя
             currentMailer = new CianMailer({
                 phone: user.phone_number,
-                maxPages: parseInt(process.env.MAX_PAGES || '10'),
+                maxPages: normalizedMaxPages,
                 maxPerPage: parseInt(process.env.MAX_PER_PAGE || '10'),
                 minPause: parseInt(process.env.MIN_PAUSE || '3'),
                 maxPause: parseInt(process.env.MAX_PAUSE || '5'),

@@ -8,13 +8,20 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
 
+const DEFAULT_CAPTCHA_API_KEY = '1bb4e1812a46fe5f41fe49d0b3ea94a7';
+const fetch = global.fetch
+    ? global.fetch.bind(global)
+    : (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
+
 // Применяем stealth плагин для обхода детектирования автоматизации
 puppeteer.use(StealthPlugin());
 
 class CianMailer {
     constructor(config = {}) {
         this.phone = config.phone;
-        this.maxPages = config.maxPages || 10;
+        const maxPagesInput = config.maxPages ?? null;
+        const parsedMaxPages = Number(maxPagesInput);
+        this.maxPages = Number.isFinite(parsedMaxPages) && parsedMaxPages > 0 ? parsedMaxPages : null;
         this.maxPerPage = config.maxPerPage || 10; // НЕ ИСПОЛЬЗУЕТСЯ - обрабатываются ВСЕ объявления на странице
         this.minPause = config.minPause || 4;
         this.maxPause = config.maxPause || 10;
@@ -34,7 +41,9 @@ class CianMailer {
         // Варианты сообщений (передаются из конфига или будут дефолтными)
         this.messageVariants = config.messageVariants || [];
 
-        this.captchaApiKey = config.captchaApiKey || process.env.CAPTCHA_API_KEY || null;
+        const providedCaptchaKey = Object.prototype.hasOwnProperty.call(config, 'captchaApiKey') ? config.captchaApiKey : undefined;
+        const resolvedCaptchaKey = providedCaptchaKey !== undefined ? providedCaptchaKey : (process.env.CAPTCHA_API_KEY || DEFAULT_CAPTCHA_API_KEY);
+        this.captchaApiKey = resolvedCaptchaKey || null;
 
         this.rektCaptcha = {
             extensionPath: config.rektCaptchaExtensionPath
@@ -1035,23 +1044,18 @@ class CianMailer {
     }
     
 
-    async solveCaptcha(frame, pageUrl) {
+    async solveCaptcha({ frame, sitekey, pageUrl, isInvisible = false }) {
         if (!this.captchaApiKey) {
             this.log('CAPTCHA_API_KEY не задан, пропускаю решение капчи', 'warning');
             return false;
         }
 
+        if (!sitekey) {
+            this.log('Не указан sitekey для решения reCAPTCHA', 'error');
+            return false;
+        }
+
         try {
-            const sitekey = await frame.evaluate(() => {
-                const el = document.querySelector('.g-recaptcha, [data-sitekey]');
-                return el ? el.getAttribute('data-sitekey') : null;
-            });
-
-            if (!sitekey) {
-                this.log('Элемент reCAPTCHA не найден внутри iframe', 'warning');
-                return false;
-            }
-
             this.log('🧩 Отправляю капчу в 2Captcha...');
 
             const payload = new URLSearchParams({
@@ -1061,6 +1065,10 @@ class CianMailer {
                 pageurl: pageUrl,
                 json: '1'
             });
+
+            if (isInvisible) {
+                payload.append('invisible', '1');
+            }
 
             const response = await fetch('http://2captcha.com/in.php', {
                 method: 'POST',
@@ -1081,18 +1089,124 @@ class CianMailer {
 
                 if (statusResult.status === 1) {
                     const token = statusResult.request;
-                    await frame.evaluate(tokenValue => {
-                        let textarea = document.getElementById('g-recaptcha-response');
-                        if (!textarea) {
-                            textarea = document.createElement('textarea');
-                            textarea.id = 'g-recaptcha-response';
-                            textarea.style.display = 'none';
-                            document.body.appendChild(textarea);
-                        }
-                        textarea.value = tokenValue;
-                    }, token);
+                    const targetFrame = frame || this.page.mainFrame();
+                    const injected = await targetFrame.evaluate((tokenValue, invisibleMode) => {
+                        const ensureFields = () => {
+                            const fields = new Set();
+                            const createField = () => {
+                                const textarea = document.createElement('textarea');
+                                textarea.id = 'g-recaptcha-response';
+                                textarea.name = 'g-recaptcha-response';
+                                textarea.style.display = 'none';
+                                document.body.appendChild(textarea);
+                                return textarea;
+                            };
 
-                    this.log('✅ Капча решена и токен вставлен', 'success');
+                            const candidates = Array.from(document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id="g-recaptcha-response"], input[name="g-recaptcha-response"], input[id="g-recaptcha-response"]'));
+                            if (candidates.length === 0) {
+                                candidates.push(createField());
+                            }
+
+                            candidates.forEach(el => fields.add(el));
+                            return Array.from(fields);
+                        };
+
+                        const applyValue = element => {
+                            if (!element) return;
+                            if ('value' in element) {
+                                element.value = tokenValue;
+                            } else {
+                                element.textContent = tokenValue;
+                            }
+
+                            const inputEvent = typeof InputEvent === 'function'
+                                ? new InputEvent('input', { bubbles: true })
+                                : new Event('input', { bubbles: true });
+                            element.dispatchEvent(inputEvent);
+                            element.dispatchEvent(new Event('change', { bubbles: true }));
+                        };
+
+                        const triggerCallbacks = () => {
+                            let triggered = false;
+                            const cfg = window.___grecaptcha_cfg;
+                            if (!cfg || !cfg.clients) {
+                                return triggered;
+                            }
+
+                            const visited = new WeakSet();
+                            const callbacks = new Set();
+                            const enqueue = target => {
+                                if (!target || typeof target !== 'object') return;
+                                if (visited.has(target)) return;
+                                visited.add(target);
+                                Object.entries(target).forEach(([key, value]) => {
+                                    if (!value) return;
+                                    if (key === 'callback' && typeof value === 'function') {
+                                        callbacks.add(value);
+                                    } else if (typeof value === 'object') {
+                                        enqueue(value);
+                                    }
+                                });
+                            };
+
+                            Object.values(cfg.clients).forEach(enqueue);
+
+                            callbacks.forEach(fn => {
+                                try {
+                                    fn(tokenValue);
+                                    triggered = true;
+                                } catch (error) {
+                                    console.error('Ошибка вызова callback reCAPTCHA:', error);
+                                }
+                            });
+
+                            return triggered;
+                        };
+
+                        const submitForms = () => {
+                            const forms = new Set();
+                            document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id="g-recaptcha-response"], input[name="g-recaptcha-response"], input[id="g-recaptcha-response"]').forEach(field => {
+                                if (field.form) {
+                                    forms.add(field.form);
+                                }
+                            });
+
+                            forms.forEach(form => {
+                                try {
+                                    const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
+                                    form.dispatchEvent(submitEvent);
+                                    if (!submitEvent.defaultPrevented && typeof form.submit === 'function') {
+                                        form.submit();
+                                    }
+                                } catch (error) {
+                                    console.error('Ошибка при отправке формы после reCAPTCHA:', error);
+                                }
+                            });
+                        };
+
+                        const fields = ensureFields();
+                        fields.forEach(applyValue);
+
+                        if (typeof window.grecaptcha === 'object' && typeof window.grecaptcha.getResponse === 'function') {
+                            try {
+                                window.grecaptcha.getResponse();
+                            } catch (error) {
+                                console.warn('Ошибка grecaptcha.getResponse:', error);
+                            }
+                        }
+
+                        const callbacksTriggered = triggerCallbacks();
+
+                        if (invisibleMode) {
+                            submitForms();
+                        } else if (!callbacksTriggered) {
+                            submitForms();
+                        }
+
+                        return { fieldsCount: fields.length, callbacksTriggered };
+                    }, token, isInvisible);
+
+                    this.log(`✅ Капча решена и токен вставлен (полей: ${injected?.fieldsCount || 0}, callbacks: ${injected?.callbacksTriggered ? 'да' : 'нет'})`, 'success');
                     return true;
                 }
 
@@ -1594,6 +1708,21 @@ class CianMailer {
                         continue;
                     }
 
+                    const recaptchaStatus = await this.solveRecaptchaIfPresent(frame);
+                    if (recaptchaStatus.found) {
+                        if (recaptchaStatus.solved) {
+                            this.log('🔁 Повторно отправляю сообщение после решения reCAPTCHA');
+                            await this.delay(2, 3);
+                            const resendAfterCaptcha = await this.clickSendButton(frame);
+                            if (!resendAfterCaptcha) {
+                                this.log('⚠️ Не удалось повторно отправить сообщение после решения reCAPTCHA', 'warning');
+                            }
+                        } else {
+                            this.log('❌ Не удалось решить reCAPTCHA — пропускаю объявление', 'error');
+                            continue;
+                        }
+                    }
+
                     // Сохраняем скриншот IFRAME (а не всей страницы!)
                     try {
                         // Делаем скриншот именно frame, а не всей страницы
@@ -1706,16 +1835,15 @@ class CianMailer {
 
             // Обрабатываем страницы
             let totalProcessed = 0;
-            for (let page = 1; page <= this.maxPages; page++) {
+            let page = 1;
+
+            while (true) {
                 if (page > 1) {
-                    const currentUrl = this.page.url();
-                    const newUrl = currentUrl.includes('&p=') 
-                        ? currentUrl.replace(/&p=\d+/, `&p=${page}`)
-                        : currentUrl + `&p=${page}`;
-                    
-                    this.log(`🌐 Переход на страницу ${page}...`);
-                    await this.page.goto(newUrl, { waitUntil: 'networkidle2' });
-                    await this.delay(3, 5);
+                    const navigated = await this.navigateToResultsPage(page);
+                    if (!navigated) {
+                        this.log('⚠️ Не удалось перейти на следующую страницу, завершаю обход.', 'warning');
+                        break;
+                    }
                 }
 
                 const processed = await this.processPage(page);
@@ -1724,12 +1852,24 @@ class CianMailer {
                 this.log(`\n✅ Страница ${page} завершена: обработано ${processed} объявлений`);
                 this.log(`📊 Всего обработано: ${totalProcessed}`);
 
-                // Пауза между страницами
-                if (page < this.maxPages) {
-                    const pause = Math.random() * (10 - 5) + 5;
-                    this.log(`⏸️ Пауза ${pause.toFixed(1)} сек перед следующей страницей...`);
-                    await this.delay(pause, pause);
+                const limitReached = this.maxPages !== null && page >= this.maxPages;
+                const hasNext = await this.hasNextResultsPage();
+
+                if (limitReached) {
+                    this.log(`⚠️ Достигнут предел maxPages (${this.maxPages}). Останавливаю переход по страницам.`, 'warning');
+                    break;
                 }
+
+                if (!hasNext) {
+                    this.log('✅ Следующая страница не найдена — достигнут конец выдачи.', 'success');
+                    break;
+                }
+
+                const pause = Math.random() * (10 - 5) + 5;
+                this.log(`⏸️ Пауза ${pause.toFixed(1)} сек перед следующей страницей...`);
+                await this.delay(pause, pause);
+
+                page += 1;
             }
 
             this.log(`\n${'='.repeat(60)}`);
@@ -1759,6 +1899,254 @@ class CianMailer {
                 await this.browser.close();
             }
         }
+    }
+
+    async solveRecaptchaIfPresent(formFrame) {
+        if (!this.captchaApiKey) {
+            return { found: false, solved: false };
+        }
+
+        const resultTemplate = (found, solved) => ({ found, solved });
+
+        try {
+            const challengeIframeHandle = await this.page.$('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]');
+            const challengeFrame = challengeIframeHandle ? await challengeIframeHandle.contentFrame() : null;
+
+            const info = await this.detectRecaptchaInfo(formFrame, challengeFrame);
+            if (!info || !info.sitekey) {
+                if (challengeIframeHandle) {
+                    this.log('❌ Обнаружен iframe reCAPTCHA, но не удалось определить sitekey', 'error');
+                    return resultTemplate(true, false);
+                }
+                return resultTemplate(false, false);
+            }
+
+            this.log(`🔐 Обнаружена reCAPTCHA (sitekey=${info.sitekey}${info.isInvisible ? ', invisible' : ''})`);
+
+            const solved = await this.solveCaptcha({
+                frame: formFrame || challengeFrame || this.page.mainFrame(),
+                sitekey: info.sitekey,
+                pageUrl: this.page.url(),
+                isInvisible: info.isInvisible
+            });
+
+            if (!solved) {
+                this.log('❌ Не удалось решить reCAPTCHA через 2Captcha', 'error');
+                return resultTemplate(true, false);
+            }
+
+            await this.waitForRecaptchaToDisappear();
+            return resultTemplate(true, true);
+        } catch (error) {
+            this.log(`Ошибка обработки reCAPTCHA: ${error.message}`, 'error');
+            return resultTemplate(true, false);
+        }
+    }
+
+    async waitForRecaptchaToDisappear(timeoutMs = 20000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const handle = await this.page.$('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]');
+            if (!handle) {
+                this.log('✅ reCAPTCHA iframe исчез', 'success');
+                return true;
+            }
+            await this.delay(1, 1);
+        }
+        this.log('⚠️ reCAPTCHA iframe не исчез вовремя', 'warning');
+        return false;
+    }
+
+    async hasNextResultsPage() {
+        try {
+            return await this.page.evaluate(() => {
+                const isEnabled = element => {
+                    if (!element) return false;
+                    if (element.hasAttribute('disabled')) return false;
+                    if ((element.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+                    const className = (element.className || '').toString().toLowerCase();
+                    if (className.includes('disabled') || className.includes('is-disabled') || className.includes('pagination__arrow--disabled')) {
+                        return false;
+                    }
+                    return true;
+                };
+
+                const matchesNext = element => {
+                    if (!element) return false;
+                    const rel = (element.getAttribute('rel') || '').toLowerCase();
+                    if (rel === 'next') return true;
+
+                    const aria = (element.getAttribute('aria-label') || '').toLowerCase();
+                    if (aria.includes('следующ')) return true;
+
+                    const dataName = (element.getAttribute('data-name') || '').toLowerCase();
+                    if (dataName.includes('pagination') && dataName.includes('next')) return true;
+
+                    const text = (element.textContent || '').toLowerCase();
+                    if (text.includes('следующ')) return true;
+
+                    return false;
+                };
+
+                const candidates = Array.from(document.querySelectorAll('a, button'))
+                    .filter(el => matchesNext(el));
+
+                return candidates.some(el => isEnabled(el));
+            });
+        } catch (error) {
+            this.log(`Ошибка проверки следующей страницы: ${error.message}`, 'warning');
+            return false;
+        }
+    }
+
+    async navigateToResultsPage(pageNumber) {
+        try {
+            const currentUrl = this.page.url();
+            const pagePattern = /([?&]p=)\d+/;
+            let newUrl;
+
+            if (pagePattern.test(currentUrl)) {
+                newUrl = currentUrl.replace(pagePattern, `$1${pageNumber}`);
+            } else {
+                const separator = currentUrl.includes('?') ? '&' : '?';
+                newUrl = `${currentUrl}${separator}p=${pageNumber}`;
+            }
+
+            this.log(`🌐 Переход на страницу ${pageNumber}...`);
+            await this.page.goto(newUrl, { waitUntil: 'networkidle2' });
+            await this.delay(3, 5);
+            return true;
+        } catch (error) {
+            this.log(`Ошибка перехода на страницу ${pageNumber}: ${error.message}`, 'error');
+            return false;
+        }
+    }
+
+    async detectRecaptchaInfo(formFrame, challengeFrame) {
+        const collectInfoFn = () => {
+            const result = {
+                sitekey: null,
+                isInvisible: false,
+                found: false
+            };
+
+            const toLowerString = value => {
+                if (typeof value === 'string') return value.toLowerCase();
+                if (value === null || value === undefined) return '';
+                try {
+                    return String(value).toLowerCase();
+                } catch (error) {
+                    return '';
+                }
+            };
+
+            const setSitekey = value => {
+                if (result.sitekey) return;
+                if (typeof value === 'string' && value.trim().length > 0) {
+                    result.sitekey = value.trim();
+                    result.found = true;
+                }
+            };
+
+            const markInvisible = () => {
+                result.isInvisible = true;
+                result.found = true;
+            };
+
+            const inspectElement = el => {
+                if (!el) return;
+                const key = el.getAttribute('data-sitekey') || el.dataset?.sitekey;
+                if (key) setSitekey(key);
+                const sizeAttr = el.getAttribute('data-size') || el.dataset?.size;
+                if (toLowerString(sizeAttr) === 'invisible') {
+                    markInvisible();
+                }
+            };
+
+            document.querySelectorAll('[data-sitekey]').forEach(inspectElement);
+
+            const inspectRecaptchaConfig = source => {
+                if (!source || typeof source !== 'object') return;
+                const visited = new WeakSet();
+                const queue = [source];
+
+                while (queue.length) {
+                    const current = queue.shift();
+                    if (!current || typeof current !== 'object') continue;
+                    if (visited.has(current)) continue;
+                    visited.add(current);
+
+                    const directKey = current.sitekey || current.k || current.client?.sitekey;
+                    const paramsKey = current.params && (current.params.sitekey || current.params.k);
+                    setSitekey(directKey || paramsKey);
+
+                    const sizeValue = toLowerString(current.size || current.params?.size);
+                    if (sizeValue === 'invisible') {
+                        markInvisible();
+                    }
+
+                    Object.values(current).forEach(value => {
+                        if (!value) return;
+                        if (typeof value === 'function') return;
+                        if (typeof value === 'object') {
+                            queue.push(value);
+                        }
+                    });
+                }
+            };
+
+            if (typeof window.___grecaptcha_cfg === 'object' && window.___grecaptcha_cfg.clients) {
+                Object.values(window.___grecaptcha_cfg.clients).forEach(client => inspectRecaptchaConfig(client));
+            }
+
+            document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]').forEach(frame => {
+                const src = frame.getAttribute('src') || '';
+                const match = src.match(/[?&]k=([^&]+)/);
+                if (match) {
+                    try {
+                        setSitekey(decodeURIComponent(match[1]));
+                    } catch (e) {
+                        setSitekey(match[1]);
+                    }
+                }
+                const sizeMatch = src.match(/[?&]size=([^&]+)/);
+                if (sizeMatch && toLowerString(sizeMatch[1]) === 'invisible') {
+                    markInvisible();
+                }
+            });
+
+            return result;
+        };
+
+        const mergeInfo = (target, source) => {
+            if (!source) return target;
+            const merged = { ...target };
+            if (!merged.sitekey && source.sitekey) {
+                merged.sitekey = source.sitekey;
+            }
+            if (source.isInvisible) {
+                merged.isInvisible = true;
+            }
+            if (source.found) {
+                merged.found = true;
+            }
+            return merged;
+        };
+
+        let aggregated = { sitekey: null, isInvisible: false, found: false };
+
+        const contexts = [formFrame, challengeFrame, this.page];
+        for (const context of contexts) {
+            if (!context) continue;
+            try {
+                const info = await context.evaluate(collectInfoFn);
+                aggregated = mergeInfo(aggregated, info);
+            } catch (error) {
+                this.log(`⚠️ Не удалось извлечь данные reCAPTCHA: ${error.message}`, 'warning');
+            }
+        }
+
+        return aggregated;
     }
 }
 
