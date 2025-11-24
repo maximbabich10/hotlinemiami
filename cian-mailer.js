@@ -9,6 +9,7 @@ const fsSync = require('fs');
 const path = require('path');
 
 const DEFAULT_CAPTCHA_API_KEY = '1bb4e1812a46fe5f41fe49d0b3ea94a7';
+const DEFAULT_SEARCH_URL = 'https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&flat_share=2&offer_seller_type%5B0%5D=2&offer_type=flat&region=1';
 const fetch = global.fetch
     ? global.fetch.bind(global)
     : (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
@@ -19,9 +20,7 @@ puppeteer.use(StealthPlugin());
 class CianMailer {
     constructor(config = {}) {
         this.phone = config.phone;
-        const maxPagesInput = config.maxPages ?? null;
-        const parsedMaxPages = Number(maxPagesInput);
-        this.maxPages = Number.isFinite(parsedMaxPages) && parsedMaxPages > 0 ? parsedMaxPages : null;
+        this.maxPages = config.maxPages || 5;
         this.maxPerPage = config.maxPerPage || 10; // НЕ ИСПОЛЬЗУЕТСЯ - обрабатываются ВСЕ объявления на странице
         this.minPause = config.minPause || 4;
         this.maxPause = config.maxPause || 10;
@@ -44,6 +43,10 @@ class CianMailer {
         const providedCaptchaKey = Object.prototype.hasOwnProperty.call(config, 'captchaApiKey') ? config.captchaApiKey : undefined;
         const resolvedCaptchaKey = providedCaptchaKey !== undefined ? providedCaptchaKey : (process.env.CAPTCHA_API_KEY || DEFAULT_CAPTCHA_API_KEY);
         this.captchaApiKey = resolvedCaptchaKey || null;
+
+        this.searchUrl = config.searchUrl || process.env.CIAN_SEARCH_URL || DEFAULT_SEARCH_URL;
+        this.searchBaseUrl = null;
+        this.currentResultsUrl = null;
 
         this.rektCaptcha = {
             extensionPath: config.rektCaptchaExtensionPath
@@ -1224,8 +1227,22 @@ class CianMailer {
         }
     }
 
-    async clickSendButton(frame) {
+    async clickSendButton(frame, options = {}) {
         try {
+            const { postClickDelayRange = [5, 8] } = options;
+            const [rawMin, rawMax] = Array.isArray(postClickDelayRange) && postClickDelayRange.length === 2
+                ? postClickDelayRange
+                : [5, 8];
+            let minDelay = Number(rawMin);
+            let maxDelay = Number(rawMax);
+            if (!Number.isFinite(minDelay)) minDelay = 0;
+            if (!Number.isFinite(maxDelay)) maxDelay = 0;
+            if (minDelay > maxDelay) {
+                const swap = minDelay;
+                minDelay = maxDelay;
+                maxDelay = swap;
+            }
+
             // Используем evaluate для поиска и клика по кнопке (работает даже с zoom)
             const clicked = await frame.evaluate(() => {
                 const selectors = [
@@ -1267,13 +1284,83 @@ class CianMailer {
             }
 
             this.log('📨 Нажал кнопку "Отправить"', 'success');
-            await this.delay(5, 8);
+            if (maxDelay > 0) {
+                await this.delay(minDelay, maxDelay);
+            }
 
             return true;
         } catch (error) {
             this.log(`❌ Ошибка при нажатии кнопки "Отправить": ${error.message}`, 'error');
             return false;
         }
+    }
+
+    async waitForOutgoingMessage(frame, messageText, options = {}) {
+        const {
+            timeoutMs = 9000,
+            checkIntervalMs = 600
+        } = options;
+
+        const normalizedTarget = typeof messageText === 'string'
+            ? messageText.replace(/\s+/g, ' ').trim().toLowerCase()
+            : '';
+
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+
+        while (Date.now() < deadline) {
+            const found = await frame.evaluate(targetText => {
+                const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const selectors = [
+                    '[data-name*=\"Message\"]',
+                    '[data-testid*=\"message\"]',
+                    'div[class*=\"Message\"]',
+                    'div[class*=\"message\"]',
+                    '.message',
+                    '.chat-message'
+                ];
+
+                const outgoingHints = ['out', 'owner', 'my', 'me'];
+
+                const elements = [];
+                const seen = new Set();
+                selectors.forEach(selector => {
+                    document.querySelectorAll(selector).forEach(element => {
+                        if (!element || seen.has(element)) return;
+                        seen.add(element);
+                        elements.push(element);
+                    });
+                });
+
+                for (const element of elements) {
+                    const text = normalize(element.textContent);
+                    if (!text) continue;
+
+                    if (targetText) {
+                        if (text.includes(targetText)) {
+                            return true;
+                        }
+                    } else {
+                        const classCandidate = typeof element.className === 'string'
+                            ? element.className
+                            : (element.getAttribute && element.getAttribute('class')) || '';
+                        const className = normalize(classCandidate);
+                        if (outgoingHints.some(hint => className.includes(hint))) {
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }, normalizedTarget);
+
+            if (found) {
+                return true;
+            }
+
+            await this.delay(checkIntervalMs / 1000, checkIntervalMs / 1000);
+        }
+
+        return false;
     }
 
     async findMessageInput(frame) {
@@ -1455,6 +1542,7 @@ class CianMailer {
             this.log(`📄 НАЧИНАЮ ОБРАБОТКУ СТРАНИЦЫ ${pageNum}`, 'success');
             this.log(`${'='.repeat(60)}\n`);
 
+            this.currentResultsUrl = this.page.url();
             const buttonsData = await this.findMessageButtons();
             
             if (buttonsData.length === 0) {
@@ -1708,19 +1796,37 @@ class CianMailer {
                         continue;
                     }
 
+                    let messageDelivered = false;
                     const recaptchaStatus = await this.solveRecaptchaIfPresent(frame);
                     if (recaptchaStatus.found) {
                         if (recaptchaStatus.solved) {
                             this.log('🔁 Повторно отправляю сообщение после решения reCAPTCHA');
-                            await this.delay(2, 3);
-                            const resendAfterCaptcha = await this.clickSendButton(frame);
+                            const resendAfterCaptcha = await this.clickSendButton(frame, {
+                                postClickDelayRange: [0.8, 1.5]
+                            });
                             if (!resendAfterCaptcha) {
                                 this.log('⚠️ Не удалось повторно отправить сообщение после решения reCAPTCHA', 'warning');
                             }
+                            messageDelivered = await this.waitForOutgoingMessage(frame, messageText, {
+                                timeoutMs: 12000,
+                                checkIntervalMs: 700
+                            });
                         } else {
                             this.log('❌ Не удалось решить reCAPTCHA — пропускаю объявление', 'error');
                             continue;
                         }
+                    } else {
+                        messageDelivered = await this.waitForOutgoingMessage(frame, messageText, {
+                            timeoutMs: 9000,
+                            checkIntervalMs: 600
+                        });
+                    }
+
+                    if (messageDelivered) {
+                        this.log('✉️ Сообщение появилось в чате — сразу двигаюсь к следующему объявлению', 'success');
+                    } else {
+                        this.log('⚠️ Не удалось подтвердить появление сообщения, даю короткую паузу для надёжности', 'warning');
+                        await this.delay(3, 4);
                     }
 
                     // Сохраняем скриншот IFRAME (а не всей страницы!)
@@ -1736,11 +1842,6 @@ class CianMailer {
                         await this.page.screenshot({ path: `message_input_${btnData.adId}.png` });
                         this.log(`Скриншот страницы: message_input_${btnData.adId}.png`);
                     }
-
-                    this.log('⏸️  Пауза 10 сек — проверь визуально текст в чате');
-                    await this.delay(15, 15);
-                    this.log('✉️  Повторно нажимаю "Отправить" для надёжности');
-                    await this.clickSendButton(frame);
 
                     // Сохраняем как обработанный
                     if (!this.alwaysProcess) {
@@ -1821,23 +1922,17 @@ class CianMailer {
             
 
             // Открываем страницу поиска
-            const baseUrl = 'https://www.cian.ru/cat.php?deal_type=sale&offer_type=flat&region=1';
+            this.searchBaseUrl = this.normalizeSearchBaseUrl(this.searchUrl);
+            const firstPageUrl = this.composeSearchUrlForPage(1);
             this.log(`🌐 Открываю страницу поиска...`);
-            await this.page.goto(baseUrl, { waitUntil: 'networkidle2' });
+            await this.page.goto(firstPageUrl, { waitUntil: 'networkidle2' });
+            this.currentResultsUrl = this.page.url();
             await this.delay(3, 5);
-
-            // Применяем фильтры
-            if (!await this.applyFiltersViaUI()) {
-                throw new Error('Не удалось применить фильтры');
-            }
-
-            await this.delay(5, 8);
 
             // Обрабатываем страницы
             let totalProcessed = 0;
-            let page = 1;
 
-            while (true) {
+            for (let page = 1; page <= this.maxPages; page++) {
                 if (page > 1) {
                     const navigated = await this.navigateToResultsPage(page);
                     if (!navigated) {
@@ -1852,24 +1947,14 @@ class CianMailer {
                 this.log(`\n✅ Страница ${page} завершена: обработано ${processed} объявлений`);
                 this.log(`📊 Всего обработано: ${totalProcessed}`);
 
-                const limitReached = this.maxPages !== null && page >= this.maxPages;
-                const hasNext = await this.hasNextResultsPage();
-
-                if (limitReached) {
+                if (page >= this.maxPages) {
                     this.log(`⚠️ Достигнут предел maxPages (${this.maxPages}). Останавливаю переход по страницам.`, 'warning');
-                    break;
-                }
-
-                if (!hasNext) {
-                    this.log('✅ Следующая страница не найдена — достигнут конец выдачи.', 'success');
                     break;
                 }
 
                 const pause = Math.random() * (10 - 5) + 5;
                 this.log(`⏸️ Пауза ${pause.toFixed(1)} сек перед следующей страницей...`);
                 await this.delay(pause, pause);
-
-                page += 1;
             }
 
             this.log(`\n${'='.repeat(60)}`);
@@ -2001,24 +2086,41 @@ class CianMailer {
 
     async navigateToResultsPage(pageNumber) {
         try {
-            const currentUrl = this.page.url();
-            const pagePattern = /([?&]p=)\d+/;
-            let newUrl;
-
-            if (pagePattern.test(currentUrl)) {
-                newUrl = currentUrl.replace(pagePattern, `$1${pageNumber}`);
-            } else {
-                const separator = currentUrl.includes('?') ? '&' : '?';
-                newUrl = `${currentUrl}${separator}p=${pageNumber}`;
-            }
-
+            const newUrl = this.composeSearchUrlForPage(pageNumber);
+ 
             this.log(`🌐 Переход на страницу ${pageNumber}...`);
             await this.page.goto(newUrl, { waitUntil: 'networkidle2' });
             await this.delay(3, 5);
+            this.currentResultsUrl = this.page.url();
             return true;
         } catch (error) {
             this.log(`Ошибка перехода на страницу ${pageNumber}: ${error.message}`, 'error');
             return false;
+        }
+    }
+
+    composeSearchUrlForPage(pageNumber) {
+        const baseUrl = this.searchBaseUrl || this.searchUrl;
+        try {
+            const url = new URL(baseUrl, 'https://www.cian.ru');
+            url.searchParams.set('p', pageNumber);
+            return url.toString();
+        } catch (error) {
+            this.log(`Не удалось сформировать URL для страницы ${pageNumber}: ${error.message}`, 'warning');
+            return baseUrl;
+        }
+    }
+
+    normalizeSearchBaseUrl(url) {
+        try {
+            const parsed = new URL(url, 'https://www.cian.ru');
+            parsed.searchParams.delete('p');
+            let normalized = parsed.toString();
+            normalized = normalized.replace(/[?&]$/, '');
+            return normalized;
+        } catch (error) {
+            this.log(`Не удалось нормализовать URL поиска: ${error.message}`, 'warning');
+            return url;
         }
     }
 
