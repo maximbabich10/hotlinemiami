@@ -79,6 +79,39 @@ const cancelKeyboard = {
     }
 };
 
+const DEFAULT_SALE_URL = 'https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&flat_share=2&offer_seller_type%5B0%5D=2&offer_type=flat&region=1';
+
+const CATEGORY_OPTIONS = {
+    sale: {
+        key: 'sale',
+        title: '🏠 Покупка квартир',
+        description: 'Покупка квартир (настройка по умолчанию)',
+        searchUrl: DEFAULT_SALE_URL
+    },
+    rent: {
+        key: 'rent',
+        title: '🏢 Аренда квартир без посредников',
+        description: 'Аренда квартир, фильтр "без посредников"',
+        searchUrl: 'https://www.cian.ru/snyat-kvartiru-bez-posrednikov/'
+    }
+};
+
+const categoryKeyboard = {
+    reply_markup: {
+        keyboard: [
+            [{ text: CATEGORY_OPTIONS.sale.title }],
+            [{ text: CATEGORY_OPTIONS.rent.title }],
+            [{ text: '❌ Отмена' }]
+        ],
+        resize_keyboard: true
+    }
+};
+
+function findCategoryByTitle(title = '') {
+    const normalized = title.trim().toLowerCase();
+    return Object.values(CATEGORY_OPTIONS).find(option => option.title.toLowerCase() === normalized);
+}
+
 // Логирование действий
 function log(message, userId = null) {
     const timestamp = new Date().toLocaleString('ru-RU');
@@ -278,6 +311,26 @@ bot.on('message', async (msg) => {
             return;
         }
         
+        if (state.step === 'select_category') {
+            const category = findCategoryByTitle(text);
+            if (!category) {
+                bot.sendMessage(chatId, '⚠️ Пожалуйста, выберите категорию, используя кнопки ниже.', categoryKeyboard);
+                return;
+            }
+
+            state.selectedCategory = category;
+            state.step = 'collecting_messages';
+            state.messages = [];
+            userStates.set(userId, state);
+
+            bot.sendMessage(
+                chatId,
+                `✅ Категория выбрана: *${category.title}*\n\n📝 Отправьте **первый вариант** сообщения.\nМожно перечислить несколько вариантов в одном сообщении — разделите их переводом строки.`,
+                { parse_mode: 'Markdown', ...cancelKeyboard }
+            );
+            return;
+        }
+
         // Сбор вариантов сообщений
         if (state.step === 'collecting_messages') {
             const maxVariants = state.expectedMessages || MESSAGE_VARIANTS_REQUIRED;
@@ -357,18 +410,16 @@ bot.on('message', async (msg) => {
 
 Ваш номер телефона сохранен: \`+7${text}\`
 
-Теперь настройте варианты сообщений для рассылки.
-
-📝 Отправьте **первый вариант** сообщения.
-Можно сразу перечислить несколько вариантов в одном сообщении — просто разделите их переводом строки.
+Перед тем как настраивать тексты сообщений, выберите тип объявлений, с которыми будем работать.
 `;
-                bot.sendMessage(chatId, successMessage, { parse_mode: 'Markdown', ...cancelKeyboard });
+                bot.sendMessage(chatId, successMessage, { parse_mode: 'Markdown' });
+                bot.sendMessage(chatId, 'Выберите категорию объявлений:', { parse_mode: 'Markdown', ...categoryKeyboard });
                 
-                // Переходим к запросу вариантов сообщений
+                // Переходим к выбору категории объявлений
                 userStates.set(userId, {
-                    step: 'collecting_messages',
-                    messages: [],
-                    expectedMessages: MESSAGE_VARIANTS_REQUIRED
+                    step: 'select_category',
+                    expectedMessages: MESSAGE_VARIANTS_REQUIRED,
+                    messages: []
                 });
                 
                 log(`Пользователь ${userId} успешно зарегистрирован с номером ${text}`, userId);
@@ -418,9 +469,23 @@ bot.on('message', async (msg) => {
         }
         
         // Проверяем, есть ли сохраненные варианты сообщений
-        const state = userStates.get(userId);
-        if (!state || !state.savedMessages || state.savedMessages.length !== MESSAGE_VARIANTS_REQUIRED) {
-            // Если нет сохраненных вариантов - запрашиваем их
+        let state = userStates.get(userId);
+        if (!state) {
+            state = { expectedMessages: MESSAGE_VARIANTS_REQUIRED };
+        }
+
+        if (!state.selectedCategory) {
+            state.step = 'select_category';
+            state.expectedMessages = state.expectedMessages || MESSAGE_VARIANTS_REQUIRED;
+            state.messages = Array.isArray(state.messages) ? state.messages : [];
+            userStates.set(userId, state);
+
+            bot.sendMessage(chatId, 'Перед запуском выберите категорию объявлений:', categoryKeyboard);
+            return;
+        }
+
+        if (!state.savedMessages || state.savedMessages.length !== MESSAGE_VARIANTS_REQUIRED) {
+            // Если нет сохраненных вариантов - запрашиваем их (после выбора категории)
             bot.sendMessage(chatId, `📝 **НАСТРОЙКА ВАРИАНТОВ СООБЩЕНИЙ**
 
 Перед запуском рассылки необходимо настроить ${MESSAGE_VARIANTS_REQUIRED} варианта сообщений.
@@ -428,11 +493,10 @@ bot.on('message', async (msg) => {
 Отправьте **первый вариант** сообщения.
 Можно перечислить несколько вариантов в одном сообщении — разделите их переводом строки.`, { parse_mode: 'Markdown', ...cancelKeyboard });
             
-            userStates.set(userId, {
-                step: 'collecting_messages',
-                messages: [],
-                expectedMessages: MESSAGE_VARIANTS_REQUIRED
-            });
+            state.step = 'collecting_messages';
+            state.messages = [];
+            state.expectedMessages = MESSAGE_VARIANTS_REQUIRED;
+            userStates.set(userId, state);
             return;
         }
         
@@ -456,6 +520,7 @@ bot.on('message', async (msg) => {
             const savedMessages = [...state.savedMessages];
             const maxPagesValue = process.env.MAX_PAGES ? parseInt(process.env.MAX_PAGES, 10) : null;
             const normalizedMaxPages = Number.isInteger(maxPagesValue) && maxPagesValue > 0 ? maxPagesValue : null;
+            const selectedCategory = state.selectedCategory || CATEGORY_OPTIONS.sale;
             
             // Создаем экземпляр CianMailer с данными пользователя
             currentMailer = new CianMailer({
@@ -464,6 +529,7 @@ bot.on('message', async (msg) => {
                 maxPerPage: parseInt(process.env.MAX_PER_PAGE || '10'),
                 minPause: parseInt(process.env.MIN_PAUSE || '3'),
                 maxPause: parseInt(process.env.MAX_PAUSE || '5'),
+                searchUrl: selectedCategory.searchUrl,
                 messageVariants: savedMessages, // Передаем сохраненные варианты напрямую
                 // Расширение rektCaptcha (если указано в .env)
                 rektCaptchaExtensionPath: process.env.REKT_CAPTCHA_EXTENSION_PATH || null,
