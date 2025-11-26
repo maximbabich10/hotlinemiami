@@ -16,7 +16,11 @@ puppeteer.use(StealthPlugin());
 class CianMailer {
     constructor(config = {}) {
         this.phone = config.phone;
-        this.maxPages = config.maxPages || 5;
+        const maxPagesNumber =
+            typeof config.maxPages === 'number' && Number.isFinite(config.maxPages) && config.maxPages > 0
+                ? Math.floor(config.maxPages)
+                : null;
+        this.maxPages = maxPagesNumber ?? Infinity;
         this.maxPerPage = config.maxPerPage || 10; // НЕ ИСПОЛЬЗУЕТСЯ - обрабатываются ВСЕ объявления на странице
         this.minPause = config.minPause || 4;
         this.maxPause = config.maxPause || 10;
@@ -1927,18 +1931,18 @@ class CianMailer {
                         await this.delay(3, 4);
                     }
 
-                    // Сохраняем скриншот IFRAME (а не всей страницы!)
-                    try {
-                        // Делаем скриншот именно frame, а не всей страницы
-                        const frameElement = await this.page.$('iframe[data-testid="ChatModal"], iframe');
-                        if (frameElement) {
-                            await frameElement.screenshot({ path: `message_input_${btnData.adId}.png` });
-                            this.log(`Скриншот iframe: message_input_${btnData.adId}.png`);
+                    if (!messageDelivered) {
+                        // Сохраняем скриншот IFRAME (а не всей страницы!) только при проблемах
+                        try {
+                            const frameElement = await this.page.$('iframe[data-testid="ChatModal"], iframe');
+                            if (frameElement) {
+                                await frameElement.screenshot({ path: `message_input_${btnData.adId}.png` });
+                                this.log(`Скриншот iframe: message_input_${btnData.adId}.png`);
+                            }
+                        } catch (e) {
+                            await this.page.screenshot({ path: `message_input_${btnData.adId}.png` });
+                            this.log(`Скриншот страницы: message_input_${btnData.adId}.png`);
                         }
-                    } catch (e) {
-                        // Если не получилось - сохраняем всю страницу
-                        await this.page.screenshot({ path: `message_input_${btnData.adId}.png` });
-                        this.log(`Скриншот страницы: message_input_${btnData.adId}.png`);
                     }
 
                     // Сохраняем как обработанный
@@ -1953,12 +1957,14 @@ class CianMailer {
                     });
 
                     // НЕ закрываем iframe - просто переходим к следующему объявлению
-                    this.log('Перехожу к следующему объявлению (iframe остаётся открытым)...');
+                    this.log(messageDelivered
+                        ? 'Перехожу к следующему объявлению без задержки.'
+                        : 'Перехожу к следующему объявлению (iframe остаётся открытым)...');
                     
                     processed++;
 
                     // Минимальная пауза между объявлениями (для стабильности)
-                    if (i < buttonsToProcess.length - 1) {
+                    if (!messageDelivered && i < buttonsToProcess.length - 1) {
                         const pause = Math.random() * (3 - 1) + 1; // 1-3 секунды
                         this.log(`⏸️ Пауза ${pause.toFixed(1)} сек...`);
                         await this.delay(pause, pause);
@@ -2025,34 +2031,47 @@ class CianMailer {
             this.log(`🌐 Открываю страницу поиска...`);
             await this.page.goto(firstPageUrl, { waitUntil: 'networkidle2' });
             this.currentResultsUrl = this.page.url();
+            this.searchBaseUrl = this.normalizeSearchBaseUrl(this.currentResultsUrl || this.searchUrl);
             await this.delay(3, 5);
 
             // Обрабатываем страницы
             let totalProcessed = 0;
+            const maxPagesLimit = Number.isFinite(this.maxPages) ? this.maxPages : null;
+            let currentPage = 1;
 
-            for (let page = 1; page <= this.maxPages; page++) {
-                if (page > 1) {
-                    const navigated = await this.navigateToResultsPage(page);
+            while (true) {
+                if (maxPagesLimit && currentPage > maxPagesLimit) {
+                    break;
+                }
+
+                if (currentPage > 1) {
+                    const navigated = await this.navigateToResultsPage(currentPage);
                     if (!navigated) {
                         this.log('⚠️ Не удалось перейти на следующую страницу, завершаю обход.', 'warning');
                         break;
                     }
                 }
 
-                const processed = await this.processPage(page);
+                const processed = await this.processPage(currentPage);
                 totalProcessed += processed;
 
-                this.log(`\n✅ Страница ${page} завершена: обработано ${processed} объявлений`);
+                this.log(`\n✅ Страница ${currentPage} завершена: обработано ${processed} объявлений`);
                 this.log(`📊 Всего обработано: ${totalProcessed}`);
 
-                if (page >= this.maxPages) {
-                    this.log(`⚠️ Достигнут предел maxPages (${this.maxPages}). Останавливаю переход по страницам.`, 'warning');
+                if (processed === 0) {
+                    this.log('⚠️ На странице не найдено новых объявлений, перехожу к следующей.', 'warning');
+                }
+
+                if (maxPagesLimit && currentPage >= maxPagesLimit) {
+                    this.log(`⚠️ Достигнут предел maxPages (${maxPagesLimit}). Останавливаю переход по страницам.`, 'warning');
                     break;
                 }
 
                 const pause = Math.random() * (10 - 5) + 5;
                 this.log(`⏸️ Пауза ${pause.toFixed(1)} сек перед следующей страницей...`);
                 await this.delay(pause, pause);
+
+                currentPage += 1;
             }
 
             this.log(`\n${'='.repeat(60)}`);
@@ -2154,4 +2173,5 @@ class CianMailer {
 }
 
 module.exports = CianMailer;
+
 
