@@ -465,6 +465,12 @@ bot.on('message', async (msg) => {
                 minPause: parseInt(process.env.MIN_PAUSE || '3'),
                 maxPause: parseInt(process.env.MAX_PAUSE || '5'),
                 messageVariants: savedMessages, // Передаем сохраненные варианты напрямую
+                // Расширение rektCaptcha (если указано в .env)
+                rektCaptchaExtensionPath: process.env.REKT_CAPTCHA_EXTENSION_PATH || null,
+                rektCaptchaAutoOpen: true,
+                rektCaptchaAutoSolve: true,
+                rektCaptchaClickDelay: 300,
+                rektCaptchaSolveDelay: 1000,
                 // Callback для запроса кода авторизации
                 onCodeRequest: async () => {
                     bot.sendMessage(chatId, '📲 **КОД ПОДТВЕРЖДЕНИЯ**\n\nНа ваш номер отправлен код. Пожалуйста, введите код из SMS:', { parse_mode: 'Markdown' });
