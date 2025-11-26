@@ -8,11 +8,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
 
-const DEFAULT_CAPTCHA_API_KEY = '1bb4e1812a46fe5f41fe49d0b3ea94a7';
 const DEFAULT_SEARCH_URL = 'https://www.cian.ru/cat.php?deal_type=sale&engine_version=2&flat_share=2&offer_seller_type%5B0%5D=2&offer_type=flat&region=1';
-const fetch = global.fetch
-    ? global.fetch.bind(global)
-    : (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
 
 // Применяем stealth плагин для обхода детектирования автоматизации
 puppeteer.use(StealthPlugin());
@@ -40,10 +36,6 @@ class CianMailer {
         // Варианты сообщений (передаются из конфига или будут дефолтными)
         this.messageVariants = config.messageVariants || [];
 
-        const providedCaptchaKey = Object.prototype.hasOwnProperty.call(config, 'captchaApiKey') ? config.captchaApiKey : undefined;
-        const resolvedCaptchaKey = providedCaptchaKey !== undefined ? providedCaptchaKey : (process.env.CAPTCHA_API_KEY || DEFAULT_CAPTCHA_API_KEY);
-        this.captchaApiKey = resolvedCaptchaKey || null;
-
         this.searchUrl = config.searchUrl || process.env.CIAN_SEARCH_URL || DEFAULT_SEARCH_URL;
         this.searchBaseUrl = null;
         this.currentResultsUrl = null;
@@ -61,12 +53,14 @@ class CianMailer {
                 : 300,
             solveDelay: typeof config.rektCaptchaSolveDelay === 'number'
                 ? config.rektCaptchaSolveDelay
-                : 1000,
-            profileDir: config.rektCaptchaProfileDir
-                ? path.resolve(config.rektCaptchaProfileDir)
-                : path.resolve(__dirname, 'chrome_profile_rektcaptcha'),
-            extensionId: null
+                : 3000,
+            profileDir: null, // Будет создан временный профиль при запуске
+            extensionId: null,
+            storagePage: null,
+            storageWarningShown: false
         };
+        
+        this.tempProfileDir = null; // Храним путь к временному профилю для удаления
     }
 
     async getWriteButtonFromCard(card) {
@@ -160,15 +154,33 @@ class CianMailer {
             let extensionPathToUse = null;
 
             if (this.rektCaptcha?.extensionPath) {
-                if (fsSync.existsSync(this.rektCaptcha.extensionPath)) {
+                const manifestPath = path.join(this.rektCaptcha.extensionPath, 'manifest.json');
+                
+                if (fsSync.existsSync(this.rektCaptcha.extensionPath) && fsSync.existsSync(manifestPath)) {
                     extensionPathToUse = this.rektCaptcha.extensionPath;
+                    this.log(`🧩 Найден manifest.json расширения: ${manifestPath}`);
+                    
+                    // Создаём ВРЕМЕННЫЙ профиль для чистого запуска (как требуется)
+                    const os = require('os');
+                    const timestamp = Date.now();
+                    const randomSuffix = Math.random().toString(36).substring(2, 8);
+                    this.tempProfileDir = path.join(os.tmpdir(), `chrome_profile_rektcaptcha_${timestamp}_${randomSuffix}`);
+                    
                     try {
-                        fsSync.mkdirSync(this.rektCaptcha.profileDir, { recursive: true });
+                        fsSync.mkdirSync(this.tempProfileDir, { recursive: true });
+                        this.rektCaptcha.profileDir = this.tempProfileDir;
+                        this.log(`✅ Создан временный профиль Chrome: ${this.tempProfileDir}`);
                     } catch (profileError) {
-                        this.log(`Ошибка создания каталога профиля Chrome: ${profileError.message}`, 'warning');
+                        this.log(`Ошибка создания временного профиля Chrome: ${profileError.message}`, 'warning');
+                        this.tempProfileDir = null;
+                        this.rektCaptcha.profileDir = null;
                     }
                 } else {
-                    this.log(`Указанный путь к расширению rektCaptcha не найден: ${this.rektCaptcha.extensionPath}`, 'warning');
+                    if (!fsSync.existsSync(this.rektCaptcha.extensionPath)) {
+                        this.log(`❌ Путь к расширению rektCaptcha не найден: ${this.rektCaptcha.extensionPath}`, 'warning');
+                    } else {
+                        this.log(`❌ manifest.json не найден в директории расширения: ${manifestPath}`, 'warning');
+                    }
                     this.rektCaptcha.extensionPath = null;
                     this.rektCaptcha.autoConfigure = false;
                 }
@@ -189,10 +201,7 @@ class CianMailer {
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
                 '--disable-web-security',
-                '--lang=ru-RU,ru',
-                '--window-size=2560,1440',
-                '--window-position=0,0',
-                '--start-maximized'
+                '--lang=ru-RU,ru'
             ];
 
             if (extensionPathToUse) {
@@ -203,7 +212,8 @@ class CianMailer {
             const launchOptions = {
                 headless: false,
                 executablePath: browserPath,
-                args: launchArgs
+                args: launchArgs,
+                defaultViewport: null
             };
 
             if (extensionPathToUse) {
@@ -214,34 +224,44 @@ class CianMailer {
 
             this.page = await this.browser.newPage();
             
-            // Устанавливаем размер окна как на большом мониторе (2560x1440 - QHD)
-            // await this.page.setViewport({
-            //     width: 2560,
-            //     height: 1440
-            // }); 
-            
-            // Устанавливаем масштаб страницы (zoom) - 75% (как будто пользователь нажал Ctrl"-")
-            await this.page.evaluate(() => {
-                document.body.style.zoom = '0.6'; // 75% от обычного размера
-            });
-            
             // Скрываем факт автоматизации
             await this.page.evaluateOnNewDocument(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
-                
-                // Устанавливаем zoom для всех страниц
-                document.addEventListener('DOMContentLoaded', () => {
-                    document.body.style.zoom = '0.75';
-                });
             });
 
             this.log('Браузер успешно запущен', 'success');
 
-            if (extensionPathToUse && this.rektCaptcha.autoConfigure) {
-                await this.configureRektCaptchaExtension();
+            // КРИТИЧЕСКАЯ ПРОВЕРКА: Расширение загружено?
+            if (extensionPathToUse) {
+                await this.delay(2, 2); // Даём время расширению загрузиться
+                
+                const targets = this.browser.targets();
+                const extensionTargets = targets.filter(t => t.url().startsWith('chrome-extension://'));
+                
+                this.log(`🔍 Найдено расширений в браузере: ${extensionTargets.length}`);
+                extensionTargets.forEach(t => {
+                    this.log(`   • ${t.type()}: ${t.url()}`);
+                });
+                
+                if (extensionTargets.length === 0) {
+                    this.log('❌ КРИТИЧЕСКАЯ ОШИБКА: Расширение НЕ ЗАГРУЗИЛОСЬ!', 'error');
+                    this.log('💡 Проверьте путь к расширению в .env', 'error');
+                }
             }
+
+            if (extensionPathToUse && this.rektCaptcha.autoConfigure) {
+                const configured = await this.configureRektCaptchaExtension();
+                if (configured) {
+                    this.log('✅ Расширение rektCaptcha настроено и готово к работе', 'success');
+                } else {
+                    this.log('⚠️ Расширение rektCaptcha не настроено, но продолжаем работу', 'warning');
+                }
+            } else if (extensionPathToUse) {
+                this.log('⚠️ Автоконфигурация расширения отключена', 'warning');
+            }
+            
             return true;
         } catch (error) {
             this.log(`Ошибка запуска браузера: ${error.message}`, 'error');
@@ -308,9 +328,12 @@ class CianMailer {
         try {
             const extensionId = await this.getRektCaptchaExtensionId();
             if (!extensionId) {
-                this.log('Не удалось определить ID расширения rektCaptcha', 'warning');
+                this.log('❌ Не удалось определить ID расширения rektCaptcha', 'error');
+                this.log('💡 Расширение может не загрузиться. Проверьте путь в .env', 'warning');
                 return false;
             }
+            
+            this.log(`✅ ID расширения rektCaptcha: ${extensionId}`, 'success');
 
             const normalize = pageName => (pageName || '').replace(/^\/+/, '');
             const candidatePages = [
@@ -348,6 +371,24 @@ class CianMailer {
                 }
 
                 this.log(`Настраиваю rektCaptcha через ${openedUrl}`);
+                
+                // КРИТИЧНО: Сначала устанавливаем настройки через chrome.storage.local
+                // Делаем это НЕСКОЛЬКО РАЗ для надёжности
+                for (let i = 0; i < 3; i++) {
+                    await extensionPage.evaluate(() => {
+                        return chrome.storage.local.set({
+                            'recaptcha_auto_open': true,
+                            'recaptcha_auto_solve': true,
+                            'recaptcha_click_delay_time': 300,
+                            'recaptcha_solve_delay_time': 3000
+                        });
+                    });
+                    await extensionPage.waitForTimeout(200);
+                }
+                
+                this.log('✅ Настройки записаны в chrome.storage.local (3 раза для надёжности)', 'success');
+                await extensionPage.waitForTimeout(1000);
+                
                 const settingsPayload = {
                     autoOpen: !!this.rektCaptcha.autoOpen,
                     autoSolve: !!this.rektCaptcha.autoSolve,
@@ -361,14 +402,24 @@ class CianMailer {
                         if (!el) {
                             return false;
                         }
+                        
+                        // ПРИНУДИТЕЛЬНО кликаем несколько раз для надёжности
                         const isOn = el.classList.contains('on');
                         if (shouldBeOn && !isOn) {
                             el.click();
+                            // Ждём и кликаем ещё раз
+                            setTimeout(() => {
+                                if (!el.classList.contains('on')) {
+                                    el.click();
+                                }
+                            }, 100);
                         }
                         if (!shouldBeOn && isOn) {
                             el.click();
                         }
-                        return true;
+                        
+                        // Проверяем результат
+                        return el.classList.contains(shouldBeOn ? 'on' : 'off');
                     };
 
                     const ensureInput = (selector, value) => {
@@ -385,15 +436,24 @@ class CianMailer {
                         return true;
                     };
 
+                    // Получаем информацию о всех доступных настройках для диагностики
+                    const allToggles = Array.from(document.querySelectorAll('.settings_toggle, input[data-settings]')).map(el => ({
+                        selector: el.getAttribute('data-settings'),
+                        type: el.tagName,
+                        isOn: el.classList?.contains('on') || el.checked,
+                        value: el.value || null
+                    }));
+
                     return {
                         autoOpenApplied: ensureToggle('.settings_toggle[data-settings="recaptcha_auto_open"]', settings.autoOpen),
                         autoSolveApplied: ensureToggle('.settings_toggle[data-settings="recaptcha_auto_solve"]', settings.autoSolve),
                         clickDelayApplied: ensureInput('input[data-settings="recaptcha_click_delay_time"]', settings.clickDelay),
-                        solveDelayApplied: ensureInput('input[data-settings="recaptcha_solve_delay_time"]', settings.solveDelay)
+                        solveDelayApplied: ensureInput('input[data-settings="recaptcha_solve_delay_time"]', settings.solveDelay),
+                        availableSettings: allToggles
                     };
                 }, settingsPayload);
 
-                await extensionPage.waitForTimeout(400);
+                await extensionPage.waitForTimeout(1000);
 
                 const issues = [];
                 if (!result.autoOpenApplied) issues.push('auto-open');
@@ -404,8 +464,71 @@ class CianMailer {
                 if (issues.length) {
                     this.log(`Не удалось настроить элементы rektCaptcha: ${issues.join(', ')}`, 'warning');
                 } else {
-                    this.log('Настройки rektCaptcha обновлены', 'success');
+                    this.log('✅ Настройки rektCaptcha обновлены (autoOpen=true, autoSolve=true)', 'success');
                 }
+                
+                // Проверяем, что настройки сохранились в chrome.storage
+                const storageCheck = await extensionPage.evaluate(() => {
+                    return chrome.storage.local.get([
+                        'recaptcha_auto_open',
+                        'recaptcha_auto_solve',
+                        'recaptcha_click_delay_time',
+                        'recaptcha_solve_delay_time'
+                    ]);
+                });
+                
+                this.log('📦 Настройки в chrome.storage.local:', 'info');
+                this.log(`   • recaptcha_auto_open: ${storageCheck.recaptcha_auto_open}`);
+                this.log(`   • recaptcha_auto_solve: ${storageCheck.recaptcha_auto_solve}`);
+                this.log(`   • recaptcha_click_delay_time: ${storageCheck.recaptcha_click_delay_time}ms`);
+                this.log(`   • recaptcha_solve_delay_time: ${storageCheck.recaptcha_solve_delay_time}ms`);
+                
+                // Выводим доступные настройки для диагностики
+                if (result.availableSettings && result.availableSettings.length > 0) {
+                    this.log(`📋 Настройки в UI:`, 'info');
+                    result.availableSettings.forEach(s => {
+                        const value = s.value ? ` (${s.value}ms)` : '';
+                        this.log(`   • ${s.selector}: ${s.isOn ? 'ON' : 'OFF'}${value}`);
+                    });
+                }
+                
+                if (!storageCheck.recaptcha_auto_open || !storageCheck.recaptcha_auto_solve) {
+                    this.log('❌ КРИТИЧЕСКАЯ ОШИБКА: Auto-Open или Auto-Solve не включены!', 'error');
+                    this.log('💡 Расширение НЕ БУДЕТ решать капчу автоматически', 'error');
+                } else {
+                    this.log('✅ Auto-Open и Auto-Solve включены - расширение готово!', 'success');
+                }
+                
+                this.log('⚠️ ВАЖНО: Эта версия rektCaptcha работает ЛОКАЛЬНО (без облака)', 'warning');
+                this.log('💡 Расширение использует ONNX модели для распознавания картинок', 'info');
+
+                // Сохраняем скриншот страницы настроек для диагностики
+                try {
+                    await extensionPage.screenshot({ path: 'rektcaptcha_settings.png' });
+                    this.log('📸 Скриншот настроек сохранён: rektcaptcha_settings.png');
+                } catch (screenshotError) {
+                    // Игнорируем ошибки скриншота
+                }
+
+                // Даём дополнительное время для сохранения настроек
+                await extensionPage.waitForTimeout(1000);
+                
+                // КРИТИЧНО: Перезагружаем страницу настроек чтобы изменения применились
+                this.log('🔄 Перезагружаю страницу настроек для применения изменений...', 'info');
+                await extensionPage.reload({ waitUntil: 'domcontentloaded' });
+                await extensionPage.waitForTimeout(1000);
+                
+                // Проверяем настройки после перезагрузки
+                const finalCheck = await extensionPage.evaluate(() => {
+                    return chrome.storage.local.get([
+                        'recaptcha_auto_open',
+                        'recaptcha_auto_solve'
+                    ]);
+                });
+                
+                this.log('🔍 Финальная проверка после перезагрузки:', 'info');
+                this.log(`   • recaptcha_auto_open: ${finalCheck.recaptcha_auto_open}`, finalCheck.recaptcha_auto_open ? 'success' : 'error');
+                this.log(`   • recaptcha_auto_solve: ${finalCheck.recaptcha_auto_solve}`, finalCheck.recaptcha_auto_solve ? 'success' : 'error');
 
                 return true;
             } finally {
@@ -425,11 +548,6 @@ class CianMailer {
             
             await this.page.goto('https://www.cian.ru/', { waitUntil: 'networkidle2' });
             
-            // Устанавливаем zoom на странице
-            await this.page.evaluate(() => {
-                document.body.style.zoom = '0.75';
-            });
-            
             await this.delay(2, 4);
 
             // Кликаем на кнопку "Войти"
@@ -443,7 +561,7 @@ class CianMailer {
             await this.page.waitForSelector('[role="dialog"], .modal, [class*="Modal"]', { timeout: 10000 });
             this.log('✅ Найдено модальное окно');
             await this.delay(2, 4);
-
+            
             // ШАГ 2: Ищем и заполняем поле телефона (по умолчанию показывается)
             this.log('🔍 Ищу поле ввода телефона в модальном окне...');
 
@@ -536,6 +654,7 @@ class CianMailer {
             this.log('✅ Кнопка "Получить код" нажата!');
             this.log('📨 Код отправлен на номер +7 (***) ***-**-' + this.phone.substring(8, 10));
             await this.delay(2, 4);
+            
 
             // ШАГ 4: Запрашиваем код у пользователя через Telegram и ждём ввода
             this.log('⏳ Жду ввода кода подтверждения от пользователя...');
@@ -777,11 +896,6 @@ class CianMailer {
         try {
             this.log('🔧 Применение фильтров через UI...');
 
-            // Устанавливаем zoom на странице
-            await this.page.evaluate(() => {
-                document.body.style.zoom = '0.75';
-            });
-
             // Ждем и кликаем "Ещё фильтры"
             this.log('Ищу кнопку "Ещё фильтры"...');
             await this.delay(2, 3); // Даем странице загрузиться
@@ -1005,243 +1119,220 @@ class CianMailer {
         }
     }
 
-    async waitRecaptchaSolved() {
-        this.log("⏳ Жду прохождения reCAPTCHA...");
-    
+    // Все функции работы с API 2Captcha удалены - капча решается расширением rektCaptcha
+
+    async checkRektCaptchaActive() {
         try {
-            // Находим iframe с капчей
-            const iframeHandle = await this.page.waitForSelector(
-                'iframe[src*="recaptcha"]',
-                { timeout: 20000 }
-            );
-    
-            const frame = await iframeHandle.contentFrame();
-            if (!frame) {
-                this.log("❌ Не удалось получить frame reCAPTCHA", 'error');
+            // Проверяем, что расширение загружено
+            if (!this.rektCaptcha?.extensionId) {
+                this.log('⚠️ ID расширения rektCaptcha не определён', 'warning');
                 return false;
             }
-    
-            // Ждем появления чекбокса
-            await frame.waitForSelector('.recaptcha-checkbox-checkmark', {
-                visible: true,
-                timeout: 20000
+
+            // Проверяем, что content script загружен на странице
+            const isActive = await this.page.evaluate(() => {
+                // Проверяем наличие признаков работы расширения
+                return new Promise((resolve) => {
+                    // Ищем признаки rektCaptcha
+                    const checkInterval = setInterval(() => {
+                        // Проверяем, есть ли изменения от расширения
+                        const recaptchaIframe = document.querySelector('iframe[src*="recaptcha"]');
+                        if (recaptchaIframe) {
+                            clearInterval(checkInterval);
+                            resolve(true);
+                        }
+                    }, 100);
+
+                    // Таймаут 2 секунды
+                    setTimeout(() => {
+                        clearInterval(checkInterval);
+                        resolve(false);
+                    }, 2000);
+                });
             });
-    
-            // Ожидаем, что чекбокс станет "пройден"
-            await frame.waitForFunction(() => {
-                const box = document.querySelector('.recaptcha-checkbox-checkmark');
-                const container = document.querySelector('.recaptcha-checkbox');
-                return (
-                    (box && box.offsetParent !== null) ||
-                    (container && container.classList.contains('recaptcha-checkbox-checked'))
-                );
-            }, { timeout: 20000 });
-    
-            this.log("✅ reCAPTCHA пройдена!");
-            return true;
-    
-        } catch (err) {
-            this.log("❌ Ошибка ожидания reCAPTCHA: " + err.message, 'error');
+
+            if (isActive) {
+                this.log('✅ Расширение rektCaptcha активно на странице', 'success');
+            } else {
+                this.log('⚠️ Расширение rektCaptcha может быть неактивно', 'warning');
+            }
+
+            return isActive;
+        } catch (error) {
+            this.log(`Ошибка проверки активности расширения: ${error.message}`, 'warning');
             return false;
         }
     }
-    
 
-    async solveCaptcha({ frame, sitekey, pageUrl, isInvisible = false }) {
-        if (!this.captchaApiKey) {
-            this.log('CAPTCHA_API_KEY не задан, пропускаю решение капчи', 'warning');
-            return false;
+    async ensureRektCaptchaStoragePage() {
+        if (!this.browser || !this.rektCaptcha?.extensionPath) {
+            return null;
         }
 
-        if (!sitekey) {
-            this.log('Не указан sitekey для решения reCAPTCHA', 'error');
+        if (this.rektCaptcha.storagePage && !this.rektCaptcha.storagePage.isClosed()) {
+            return this.rektCaptcha.storagePage;
+        }
+
+        const extensionId = await this.getRektCaptchaExtensionId();
+        if (!extensionId) {
+            return null;
+        }
+
+        const pageUrl = `chrome-extension://${extensionId}/${this.rektCaptcha.popupPage || 'popup.html'}`;
+        let storagePage = null;
+
+        try {
+            storagePage = await this.browser.newPage();
+            await storagePage.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
+            this.rektCaptcha.storagePage = storagePage;
+            this.rektCaptcha.storageWarningShown = false;
+            return storagePage;
+        } catch (error) {
+            if (storagePage) {
+                await storagePage.close().catch(() => {});
+            }
+            if (!this.rektCaptcha.storageWarningShown) {
+                this.log(`⚠️ Не удалось открыть страницу rektCaptcha для чтения storage: ${error.message}`, 'warning');
+                this.rektCaptcha.storageWarningShown = true;
+            }
+            this.rektCaptcha.storagePage = null;
+            return null;
+        }
+    }
+
+    async getRektCaptchaStorage(keys = []) {
+        try {
+            const storagePage = await this.ensureRektCaptchaStoragePage();
+            if (!storagePage) {
+                return null;
+            }
+
+            const data = await storagePage.evaluate(requestedKeys => {
+                const keysToRequest = Array.isArray(requestedKeys) && requestedKeys.length > 0
+                    ? requestedKeys
+                    : null;
+
+                return new Promise((resolve, reject) => {
+                    try {
+                        chrome.storage.local.get(keysToRequest, result => {
+                            const err = chrome.runtime.lastError;
+                            if (err) {
+                                reject(err.message || String(err));
+                                return;
+                            }
+                            resolve(result);
+                        });
+                    } catch (storageError) {
+                        reject(storageError.message || String(storageError));
+                    }
+                });
+            }, keys);
+
+            if (data) {
+                this.rektCaptcha.storageWarningShown = false;
+            }
+
+            return data;
+        } catch (error) {
+            if (!this.rektCaptcha.storageWarningShown) {
+                this.log(`⚠️ Ошибка чтения chrome.storage rektCaptcha: ${error}`, 'warning');
+                this.rektCaptcha.storageWarningShown = true;
+            }
+
+            if (this.rektCaptcha.storagePage && !this.rektCaptcha.storagePage.isClosed()) {
+                try {
+                    await this.rektCaptcha.storagePage.close();
+                } catch {}
+            }
+            this.rektCaptcha.storagePage = null;
+            return null;
+        }
+    }
+
+    async isRecaptchaSolvedInFrame(frame) {
+        if (!frame) {
             return false;
         }
 
         try {
-            this.log('🧩 Отправляю капчу в 2Captcha...');
+            return await frame.evaluate(() => {
+                const tokenSelectors = [
+                    'textarea[name="g-recaptcha-response"]',
+                    'textarea#g-recaptcha-response',
+                    'input[name="g-recaptcha-response"]',
+                    'input#g-recaptcha-response'
+                ];
 
-            const payload = new URLSearchParams({
-                key: this.captchaApiKey,
-                method: 'userrecaptcha',
-                googlekey: sitekey,
-                pageurl: pageUrl,
-                json: '1'
-            });
+                for (const selector of tokenSelectors) {
+                    const field = document.querySelector(selector);
+                    if (field && typeof field.value === 'string' && field.value.trim().length > 0) {
+                        return true;
+                    }
+                }
 
-            if (isInvisible) {
-                payload.append('invisible', '1');
-            }
-
-            const response = await fetch('http://2captcha.com/in.php', {
-                method: 'POST',
-                body: payload
-            });
-            const result = await response.json();
-
-            if (result.status !== 1) {
-                this.log(`Ошибка отправки капчи: ${JSON.stringify(result)}`, 'error');
-                return false;
-            }
-
-            const captchaId = result.request;
-            for (let attempt = 0; attempt < 8; attempt++) {
-                await this.delay(12, 12);
-                const statusResponse = await fetch(`http://2captcha.com/res.php?key=${this.captchaApiKey}&action=get&id=${captchaId}&json=1`);
-                const statusResult = await statusResponse.json();
-
-                if (statusResult.status === 1) {
-                    const token = statusResult.request;
-                    const targetFrame = frame || this.page.mainFrame();
-                    const injected = await targetFrame.evaluate((tokenValue, invisibleMode) => {
-                        const ensureFields = () => {
-                            const fields = new Set();
-                            const createField = () => {
-                                const textarea = document.createElement('textarea');
-                                textarea.id = 'g-recaptcha-response';
-                                textarea.name = 'g-recaptcha-response';
-                                textarea.style.display = 'none';
-                                document.body.appendChild(textarea);
-                                return textarea;
-                            };
-
-                            const candidates = Array.from(document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id="g-recaptcha-response"], input[name="g-recaptcha-response"], input[id="g-recaptcha-response"]'));
-                            if (candidates.length === 0) {
-                                candidates.push(createField());
-                            }
-
-                            candidates.forEach(el => fields.add(el));
-                            return Array.from(fields);
-                        };
-
-                        const applyValue = element => {
-                            if (!element) return;
-                            if ('value' in element) {
-                                element.value = tokenValue;
-                            } else {
-                                element.textContent = tokenValue;
-                            }
-
-                            const inputEvent = typeof InputEvent === 'function'
-                                ? new InputEvent('input', { bubbles: true })
-                                : new Event('input', { bubbles: true });
-                            element.dispatchEvent(inputEvent);
-                            element.dispatchEvent(new Event('change', { bubbles: true }));
-                        };
-
-                        const triggerCallbacks = () => {
-                            let triggered = false;
-                            const cfg = window.___grecaptcha_cfg;
-                            if (!cfg || !cfg.clients) {
-                                return triggered;
-                            }
-
-                            const visited = new WeakSet();
-                            const callbacks = new Set();
-                            const enqueue = target => {
-                                if (!target || typeof target !== 'object') return;
-                                if (visited.has(target)) return;
-                                visited.add(target);
-                                Object.entries(target).forEach(([key, value]) => {
-                                    if (!value) return;
-                                    if (key === 'callback' && typeof value === 'function') {
-                                        callbacks.add(value);
-                                    } else if (typeof value === 'object') {
-                                        enqueue(value);
-                                    }
-                                });
-                            };
-
-                            Object.values(cfg.clients).forEach(enqueue);
-
-                            callbacks.forEach(fn => {
-                                try {
-                                    fn(tokenValue);
-                                    triggered = true;
-                                } catch (error) {
-                                    console.error('Ошибка вызова callback reCAPTCHA:', error);
-                                }
-                            });
-
-                            return triggered;
-                        };
-
-                        const submitForms = () => {
-                            const forms = new Set();
-                            document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id="g-recaptcha-response"], input[name="g-recaptcha-response"], input[id="g-recaptcha-response"]').forEach(field => {
-                                if (field.form) {
-                                    forms.add(field.form);
-                                }
-                            });
-
-                            forms.forEach(form => {
-                                try {
-                                    const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
-                                    form.dispatchEvent(submitEvent);
-                                    if (!submitEvent.defaultPrevented && typeof form.submit === 'function') {
-                                        form.submit();
-                                    }
-                                } catch (error) {
-                                    console.error('Ошибка при отправке формы после reCAPTCHA:', error);
-                                }
-                            });
-                        };
-
-                        const fields = ensureFields();
-                        fields.forEach(applyValue);
-
-                        if (typeof window.grecaptcha === 'object' && typeof window.grecaptcha.getResponse === 'function') {
-                            try {
-                                window.grecaptcha.getResponse();
-                            } catch (error) {
-                                console.warn('Ошибка grecaptcha.getResponse:', error);
-                            }
-                        }
-
-                        const callbacksTriggered = triggerCallbacks();
-
-                        if (invisibleMode) {
-                            submitForms();
-                        } else if (!callbacksTriggered) {
-                            submitForms();
-                        }
-
-                        return { fieldsCount: fields.length, callbacksTriggered };
-                    }, token, isInvisible);
-
-                    this.log(`✅ Капча решена и токен вставлен (полей: ${injected?.fieldsCount || 0}, callbacks: ${injected?.callbacksTriggered ? 'да' : 'нет'})`, 'success');
+                const checkbox = document.querySelector('div[role="checkbox"][aria-checked="true"]');
+                if (checkbox) {
                     return true;
                 }
 
-                if (statusResult.request !== 'CAPCHA_NOT_READY') {
-                    this.log(`Ошибка решения капчи: ${JSON.stringify(statusResult)}`, 'error');
-                    return false;
-                }
-            }
-
-            this.log('⏱️ Превышено время ожидания решения капчи', 'error');
-            return false;
+                return false;
+            });
         } catch (error) {
-            this.log(`Ошибка во время решения капчи: ${error.message}`, 'error');
             return false;
         }
     }
 
-    async clickSendButton(frame, options = {}) {
-        try {
-            const { postClickDelayRange = [5, 8] } = options;
-            const [rawMin, rawMax] = Array.isArray(postClickDelayRange) && postClickDelayRange.length === 2
-                ? postClickDelayRange
-                : [5, 8];
-            let minDelay = Number(rawMin);
-            let maxDelay = Number(rawMax);
-            if (!Number.isFinite(minDelay)) minDelay = 0;
-            if (!Number.isFinite(maxDelay)) maxDelay = 0;
-            if (minDelay > maxDelay) {
-                const swap = minDelay;
-                minDelay = maxDelay;
-                maxDelay = swap;
+    async waitForRektCaptchaSolve(frame, options = {}) {
+        const timeoutMs = options.timeoutMs ?? 60000;
+        const pollIntervalMs = options.pollIntervalMs ?? 1000;
+
+        let storageBaseline = 0;
+        let storageAvailable = false;
+
+        if (this.rektCaptcha?.extensionPath) {
+            const initialData = await this.getRektCaptchaStorage(['rektcaptcha_last_solved_at']);
+            if (initialData && initialData.rektcaptcha_last_solved_at) {
+                storageBaseline = Number(initialData.rektcaptcha_last_solved_at) || 0;
+                storageAvailable = true;
             }
+        }
+
+        const startedAt = Date.now();
+
+        while (Date.now() - startedAt < timeoutMs) {
+            const solvedViaDom = await this.isRecaptchaSolvedInFrame(frame);
+            if (solvedViaDom) {
+                this.log('✅ reCAPTCHA подтверждена (обнаружен токен на странице)', 'success');
+                return true;
+            }
+
+            if (this.rektCaptcha?.extensionPath) {
+                const storageData = await this.getRektCaptchaStorage(['rektcaptcha_status', 'rektcaptcha_last_solved_at']);
+                if (storageData) {
+                    storageAvailable = true;
+                    const status = storageData.rektcaptcha_status;
+                    const lastSolvedAt = Number(storageData.rektcaptcha_last_solved_at) || 0;
+
+                    if (status === 'solved' && lastSolvedAt) {
+                        if (!storageBaseline || lastSolvedAt > storageBaseline) {
+                            this.log('✅ rektCaptcha сообщила о решении reCAPTCHA через storage', 'success');
+                            return true;
+                        }
+                    }
+                } else if (storageAvailable) {
+                    storageAvailable = false;
+                }
+            }
+
+            await this.delay(pollIntervalMs / 1000, pollIntervalMs / 1000);
+        }
+
+        this.log('⚠️ Не дождался подтверждения решения reCAPTCHA (таймаут 60 секунд)', 'warning');
+        return false;
+    }
+
+    async clickSendButton(frame, attempt = 0) {
+        try {
 
             // Используем evaluate для поиска и клика по кнопке (работает даже с zoom)
             const clicked = await frame.evaluate(() => {
@@ -1280,17 +1371,44 @@ class CianMailer {
 
             if (!clicked) {
                 this.log('❌ Кнопка "Отправить" не найдена', 'error');
+                if (attempt < 1) {
+                    this.log('⏳ Жду 30 секунд перед повторным поиском кнопки', 'warning');
+                    await this.delay(30, 30);
+                    return this.clickSendButton(frame, attempt + 1);
+                }
                 return false;
             }
 
-            this.log('📨 Нажал кнопку "Отправить"', 'success');
-            if (maxDelay > 0) {
-                await this.delay(minDelay, maxDelay);
+            this.log('📨 Нажал кнопку "Отправить" (попытка #' + (attempt + 1) + ')', 'success');
+
+            if (attempt < 1) {
+                this.log('⏳ Ожидаю подтверждение решения reCAPTCHA через расширение...', 'info');
+                const solved = await this.waitForRektCaptchaSolve(frame, {
+                    timeoutMs: 60000,
+                    pollIntervalMs: 1000
+                });
+
+                if (solved) {
+                    this.log('⏳ Жду 3 секунды перед вторым нажатием "Отправить"', 'info');
+                    await this.delay(3, 3);
+                } else {
+                    this.log('⚠️ Не получил подтверждение решения, жду 3 секунды и всё равно пробую ещё раз', 'warning');
+                    await this.delay(3, 3);
+                }
+
+                return this.clickSendButton(frame, attempt + 1);
             }
+
+            await this.delay(3, 3);
 
             return true;
         } catch (error) {
             this.log(`❌ Ошибка при нажатии кнопки "Отправить": ${error.message}`, 'error');
+            if (attempt < 1) {
+                this.log('⏳ Жду 10 секунд и повторяю попытку отправки', 'warning');
+                await this.delay(10, 10);
+                return this.clickSendButton(frame, attempt + 1);
+            }
             return false;
         }
     }
@@ -1779,6 +1897,7 @@ class CianMailer {
                     this.log(`Выбран вариант сообщения: ${this.messageVariants.indexOf(messageText) + 1}/4`);
 
                     this.log('НАЧИНАЮ ВВОД ТЕКСТА...');
+                    
                     const inputFilled = await this.fillMessageField(frame, messageField, messageText, fieldInfo);
                     if (!inputFilled) {
                         this.log('❌ Не удалось ввести текст сообщения', 'error');
@@ -1796,31 +1915,10 @@ class CianMailer {
                         continue;
                     }
 
-                    let messageDelivered = false;
-                    const recaptchaStatus = await this.solveRecaptchaIfPresent(frame);
-                    if (recaptchaStatus.found) {
-                        if (recaptchaStatus.solved) {
-                            this.log('🔁 Повторно отправляю сообщение после решения reCAPTCHA');
-                            const resendAfterCaptcha = await this.clickSendButton(frame, {
-                                postClickDelayRange: [0.8, 1.5]
-                            });
-                            if (!resendAfterCaptcha) {
-                                this.log('⚠️ Не удалось повторно отправить сообщение после решения reCAPTCHA', 'warning');
-                            }
-                            messageDelivered = await this.waitForOutgoingMessage(frame, messageText, {
-                                timeoutMs: 12000,
-                                checkIntervalMs: 700
-                            });
-                        } else {
-                            this.log('❌ Не удалось решить reCAPTCHA — пропускаю объявление', 'error');
-                            continue;
-                        }
-                    } else {
-                        messageDelivered = await this.waitForOutgoingMessage(frame, messageText, {
-                            timeoutMs: 9000,
-                            checkIntervalMs: 600
-                        });
-                    }
+                    const messageDelivered = await this.waitForOutgoingMessage(frame, messageText, {
+                        timeoutMs: 9000,
+                        checkIntervalMs: 600
+                    });
 
                     if (messageDelivered) {
                         this.log('✉️ Сообщение появилось в чате — сразу двигаюсь к следующему объявлению', 'success');
@@ -1983,104 +2081,33 @@ class CianMailer {
                 await this.delay(5, 5);
                 await this.browser.close();
             }
-        }
-    }
-
-    async solveRecaptchaIfPresent(formFrame) {
-        if (!this.captchaApiKey) {
-            return { found: false, solved: false };
-        }
-
-        const resultTemplate = (found, solved) => ({ found, solved });
-
-        try {
-            const challengeIframeHandle = await this.page.$('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]');
-            const challengeFrame = challengeIframeHandle ? await challengeIframeHandle.contentFrame() : null;
-
-            const info = await this.detectRecaptchaInfo(formFrame, challengeFrame);
-            if (!info || !info.sitekey) {
-                if (challengeIframeHandle) {
-                    this.log('❌ Обнаружен iframe reCAPTCHA, но не удалось определить sitekey', 'error');
-                    return resultTemplate(true, false);
+            
+            // Удаляем временный профиль Chrome для чистого следующего запуска
+            if (this.tempProfileDir && fsSync.existsSync(this.tempProfileDir)) {
+                try {
+                    this.log('🧹 Очищаю временный профиль Chrome...');
+                    // Используем рекурсивное удаление
+                    const rimraf = (dirPath) => {
+                        if (fsSync.existsSync(dirPath)) {
+                            const entries = fsSync.readdirSync(dirPath, { withFileTypes: true });
+                            for (const entry of entries) {
+                                const fullPath = path.join(dirPath, entry.name);
+                                if (entry.isDirectory()) {
+                                    rimraf(fullPath);
+                                } else {
+                                    fsSync.unlinkSync(fullPath);
+                                }
+                            }
+                            fsSync.rmdirSync(dirPath);
+                        }
+                    };
+                    
+                    rimraf(this.tempProfileDir);
+                    this.log('✅ Временный профиль удалён');
+                } catch (cleanupError) {
+                    this.log(`⚠️ Не удалось удалить временный профиль: ${cleanupError.message}`, 'warning');
                 }
-                return resultTemplate(false, false);
             }
-
-            this.log(`🔐 Обнаружена reCAPTCHA (sitekey=${info.sitekey}${info.isInvisible ? ', invisible' : ''})`);
-
-            const solved = await this.solveCaptcha({
-                frame: formFrame || challengeFrame || this.page.mainFrame(),
-                sitekey: info.sitekey,
-                pageUrl: this.page.url(),
-                isInvisible: info.isInvisible
-            });
-
-            if (!solved) {
-                this.log('❌ Не удалось решить reCAPTCHA через 2Captcha', 'error');
-                return resultTemplate(true, false);
-            }
-
-            await this.waitForRecaptchaToDisappear();
-            return resultTemplate(true, true);
-        } catch (error) {
-            this.log(`Ошибка обработки reCAPTCHA: ${error.message}`, 'error');
-            return resultTemplate(true, false);
-        }
-    }
-
-    async waitForRecaptchaToDisappear(timeoutMs = 20000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            const handle = await this.page.$('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]');
-            if (!handle) {
-                this.log('✅ reCAPTCHA iframe исчез', 'success');
-                return true;
-            }
-            await this.delay(1, 1);
-        }
-        this.log('⚠️ reCAPTCHA iframe не исчез вовремя', 'warning');
-        return false;
-    }
-
-    async hasNextResultsPage() {
-        try {
-            return await this.page.evaluate(() => {
-                const isEnabled = element => {
-                    if (!element) return false;
-                    if (element.hasAttribute('disabled')) return false;
-                    if ((element.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
-                    const className = (element.className || '').toString().toLowerCase();
-                    if (className.includes('disabled') || className.includes('is-disabled') || className.includes('pagination__arrow--disabled')) {
-                        return false;
-                    }
-                    return true;
-                };
-
-                const matchesNext = element => {
-                    if (!element) return false;
-                    const rel = (element.getAttribute('rel') || '').toLowerCase();
-                    if (rel === 'next') return true;
-
-                    const aria = (element.getAttribute('aria-label') || '').toLowerCase();
-                    if (aria.includes('следующ')) return true;
-
-                    const dataName = (element.getAttribute('data-name') || '').toLowerCase();
-                    if (dataName.includes('pagination') && dataName.includes('next')) return true;
-
-                    const text = (element.textContent || '').toLowerCase();
-                    if (text.includes('следующ')) return true;
-
-                    return false;
-                };
-
-                const candidates = Array.from(document.querySelectorAll('a, button'))
-                    .filter(el => matchesNext(el));
-
-                return candidates.some(el => isEnabled(el));
-            });
-        } catch (error) {
-            this.log(`Ошибка проверки следующей страницы: ${error.message}`, 'warning');
-            return false;
         }
     }
 
@@ -2124,132 +2151,6 @@ class CianMailer {
         }
     }
 
-    async detectRecaptchaInfo(formFrame, challengeFrame) {
-        const collectInfoFn = () => {
-            const result = {
-                sitekey: null,
-                isInvisible: false,
-                found: false
-            };
-
-            const toLowerString = value => {
-                if (typeof value === 'string') return value.toLowerCase();
-                if (value === null || value === undefined) return '';
-                try {
-                    return String(value).toLowerCase();
-                } catch (error) {
-                    return '';
-                }
-            };
-
-            const setSitekey = value => {
-                if (result.sitekey) return;
-                if (typeof value === 'string' && value.trim().length > 0) {
-                    result.sitekey = value.trim();
-                    result.found = true;
-                }
-            };
-
-            const markInvisible = () => {
-                result.isInvisible = true;
-                result.found = true;
-            };
-
-            const inspectElement = el => {
-                if (!el) return;
-                const key = el.getAttribute('data-sitekey') || el.dataset?.sitekey;
-                if (key) setSitekey(key);
-                const sizeAttr = el.getAttribute('data-size') || el.dataset?.size;
-                if (toLowerString(sizeAttr) === 'invisible') {
-                    markInvisible();
-                }
-            };
-
-            document.querySelectorAll('[data-sitekey]').forEach(inspectElement);
-
-            const inspectRecaptchaConfig = source => {
-                if (!source || typeof source !== 'object') return;
-                const visited = new WeakSet();
-                const queue = [source];
-
-                while (queue.length) {
-                    const current = queue.shift();
-                    if (!current || typeof current !== 'object') continue;
-                    if (visited.has(current)) continue;
-                    visited.add(current);
-
-                    const directKey = current.sitekey || current.k || current.client?.sitekey;
-                    const paramsKey = current.params && (current.params.sitekey || current.params.k);
-                    setSitekey(directKey || paramsKey);
-
-                    const sizeValue = toLowerString(current.size || current.params?.size);
-                    if (sizeValue === 'invisible') {
-                        markInvisible();
-                    }
-
-                    Object.values(current).forEach(value => {
-                        if (!value) return;
-                        if (typeof value === 'function') return;
-                        if (typeof value === 'object') {
-                            queue.push(value);
-                        }
-                    });
-                }
-            };
-
-            if (typeof window.___grecaptcha_cfg === 'object' && window.___grecaptcha_cfg.clients) {
-                Object.values(window.___grecaptcha_cfg.clients).forEach(client => inspectRecaptchaConfig(client));
-            }
-
-            document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="google.com/recaptcha"]').forEach(frame => {
-                const src = frame.getAttribute('src') || '';
-                const match = src.match(/[?&]k=([^&]+)/);
-                if (match) {
-                    try {
-                        setSitekey(decodeURIComponent(match[1]));
-                    } catch (e) {
-                        setSitekey(match[1]);
-                    }
-                }
-                const sizeMatch = src.match(/[?&]size=([^&]+)/);
-                if (sizeMatch && toLowerString(sizeMatch[1]) === 'invisible') {
-                    markInvisible();
-                }
-            });
-
-            return result;
-        };
-
-        const mergeInfo = (target, source) => {
-            if (!source) return target;
-            const merged = { ...target };
-            if (!merged.sitekey && source.sitekey) {
-                merged.sitekey = source.sitekey;
-            }
-            if (source.isInvisible) {
-                merged.isInvisible = true;
-            }
-            if (source.found) {
-                merged.found = true;
-            }
-            return merged;
-        };
-
-        let aggregated = { sitekey: null, isInvisible: false, found: false };
-
-        const contexts = [formFrame, challengeFrame, this.page];
-        for (const context of contexts) {
-            if (!context) continue;
-            try {
-                const info = await context.evaluate(collectInfoFn);
-                aggregated = mergeInfo(aggregated, info);
-            } catch (error) {
-                this.log(`⚠️ Не удалось извлечь данные reCAPTCHA: ${error.message}`, 'warning');
-            }
-        }
-
-        return aggregated;
-    }
 }
 
 module.exports = CianMailer;
