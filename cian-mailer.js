@@ -2131,18 +2131,57 @@ class CianMailer {
     }
 
     async navigateToResultsPage(pageNumber) {
+        const previousUrl = this.page.url();
+        const targetUrl = this.composeSearchUrlForPage(pageNumber);
+
+        this.log(`🌐 Пытаюсь перейти на страницу ${pageNumber} по URL ${targetUrl}`);
+
+        let directNavigationSucceeded = false;
         try {
-            const newUrl = this.composeSearchUrlForPage(pageNumber);
- 
-            this.log(`🌐 Переход на страницу ${pageNumber}...`);
-            await this.page.goto(newUrl, { waitUntil: 'networkidle2' });
-            await this.delay(3, 5);
-            this.currentResultsUrl = this.page.url();
-            return true;
+            await this.page.goto(targetUrl, { waitUntil: 'networkidle2' });
+            directNavigationSucceeded = true;
         } catch (error) {
-            this.log(`Ошибка перехода на страницу ${pageNumber}: ${error.message}`, 'error');
+            this.log(`⚠️ Прямой переход на ${targetUrl} завершился ошибкой: ${error.message}`, 'warning');
+        }
+
+        await this.delay(2, 3);
+
+        this.currentResultsUrl = this.page.url();
+        let currentPageNumber = this.getPageNumberFromUrl(this.currentResultsUrl);
+
+        if (directNavigationSucceeded && currentPageNumber === pageNumber) {
+            this.log(`✅ Успешно перешёл на страницу ${pageNumber} прямым переходом`);
+            this.searchBaseUrl = this.normalizeSearchBaseUrl(this.currentResultsUrl);
+            return true;
+        }
+
+        this.log(`⚠️ Прямой переход не дал нужного результата (текущий URL: ${this.currentResultsUrl}). Пробую кликнуть по пагинации.`, 'warning');
+
+        const clickSucceeded = await this.clickNextPageButton();
+        if (!clickSucceeded) {
+            this.log('❌ Не удалось найти кнопку перехода на следующую страницу', 'error');
             return false;
         }
+
+        try {
+            await Promise.race([
+                this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => null),
+                this.page.waitForFunction(prev => window.location.href !== prev, { timeout: 15000 }, previousUrl).catch(() => null)
+            ]);
+        } catch {}
+
+        await this.delay(2, 3);
+        this.currentResultsUrl = this.page.url();
+        currentPageNumber = this.getPageNumberFromUrl(this.currentResultsUrl);
+        this.searchBaseUrl = this.normalizeSearchBaseUrl(this.currentResultsUrl);
+
+        if (currentPageNumber === pageNumber || currentPageNumber === null) {
+            this.log(`✅ Перешёл на страницу ${pageNumber} через интерфейс (URL: ${this.currentResultsUrl})`);
+            return true;
+        }
+
+        this.log(`⚠️ После клика номер страницы ${currentPageNumber}, ожидали ${pageNumber}.`, 'warning');
+        return currentPageNumber >= pageNumber;
     }
 
     composeSearchUrlForPage(pageNumber) {
@@ -2167,6 +2206,70 @@ class CianMailer {
         } catch (error) {
             this.log(`Не удалось нормализовать URL поиска: ${error.message}`, 'warning');
             return url;
+        }
+    }
+
+    getPageNumberFromUrl(url) {
+        try {
+            const parsed = new URL(url, 'https://www.cian.ru');
+            const pValue = parsed.searchParams.get('p');
+            if (!pValue) return parsed.pathname.includes('snyat-kvartiru') ? 1 : null;
+            const number = parseInt(pValue, 10);
+            return Number.isFinite(number) ? number : null;
+        } catch {
+            return null;
+        }
+    }
+
+    async clickNextPageButton() {
+        try {
+            return await this.page.evaluate(() => {
+                const isDisabled = element => {
+                    if (!element) return true;
+                    if (element.hasAttribute('disabled')) return true;
+                    const ariaDisabled = (element.getAttribute('aria-disabled') || '').toLowerCase();
+                    if (ariaDisabled === 'true') return true;
+                    const className = (element.className || '').toString().toLowerCase();
+                    return className.includes('disabled') || className.includes('is-disabled');
+                };
+
+                const selectors = [
+                    'a[rel=\"next\"]',
+                    'button[aria-label*=\"следующ\" i]',
+                    'a[aria-label*=\"следующ\" i]',
+                    '[data-name*=\"Pagination\" i][data-name*=\"next\" i]',
+                    'a[class*=\"_pagination\"]',
+                    'button[class*=\"_pagination\"]'
+                ];
+
+                for (const selector of selectors) {
+                    const element = document.querySelector(selector);
+                    if (element && element.offsetParent !== null && !isDisabled(element)) {
+                        element.scrollIntoView({ block: 'center', behavior: 'instant' });
+                        element.click();
+                        return true;
+                    }
+                }
+
+                const textCandidate = Array.from(document.querySelectorAll('a, button')).find(el => {
+                    if (!el || el.offsetParent === null) return false;
+                    const text = (el.textContent || '').toLowerCase();
+                    if (!text) return false;
+                    if (!text.includes('следующ') && !text.includes('далее') && !text.includes('next')) return false;
+                    return !isDisabled(el);
+                });
+
+                if (textCandidate) {
+                    textCandidate.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    textCandidate.click();
+                    return true;
+                }
+
+                return false;
+            });
+        } catch (error) {
+            this.log(`Ошибка при попытке кликнуть по кнопке следующей страницы: ${error.message}`, 'warning');
+            return false;
         }
     }
 
