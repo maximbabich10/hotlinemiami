@@ -92,7 +92,7 @@ const CATEGORY_OPTIONS = {
         key: 'rent',
         title: '🏢 Аренда квартир без посредников',
         description: 'Аренда квартир, фильтр "без посредников"',
-        searchUrl: 'https://www.cian.ru/snyat-kvartiru-bez-posrednikov/'
+        searchUrl: 'https://www.cian.ru/cat.php?deal_type=rent&engine_version=2&is_by_homeowner=1&offer_type=flat&region=1&sort=creation_date_desc&type=4'
     }
 };
 
@@ -131,7 +131,7 @@ bot.onText(/\/start/, async (msg) => {
         
         if (!user) {
             // Новый пользователь - предлагаем регистрацию
-            const welcomeMessage = `
+    const welcomeMessage = `
 🤖 **CIAN Telegram Bot**
 
 Добро пожаловать! Этот бот автоматизирует рассылку сообщений на CIAN.
@@ -157,7 +157,7 @@ bot.onText(/\/start/, async (msg) => {
 
 Нажмите на любую кнопку для начала работы.
 `;
-            bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown', ...mainKeyboard });
+    bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown', ...mainKeyboard });
         }
     } catch (error) {
         log(`Ошибка при обработке /start: ${error.message}`, userId);
@@ -563,7 +563,7 @@ ID: \`${payload.adId}\`
                     }
                 }
             });
-            
+                    
             // Обработчик для получения кода
             const codeHandler = (msg) => {
                 if (msg.chat.id === chatId && userId === msg.from.id) {

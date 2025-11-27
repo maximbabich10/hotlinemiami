@@ -122,7 +122,11 @@ class CianMailer {
         }
         try {
             const data = await fs.readFile(this.processedFile, 'utf-8');
-            this.processedIds = new Set(data.split('\n').filter(id => id.trim()));
+            const ids = data
+                .split('\n')
+                .map(id => id.trim())
+                .filter(id => id && !id.startsWith('temp_'));
+            this.processedIds = new Set(ids);
             this.log(`Загружено ${this.processedIds.size} обработанных объявлений`);
         } catch (error) {
             this.log('Файл прогресса не найден, создаю новый', 'warning');
@@ -132,11 +136,20 @@ class CianMailer {
 
     async saveProcessedId(adId) {
         if (this.alwaysProcess) return;
+        if (!adId || adId.startsWith('temp_')) {
+            return;
+        }
+        if (this.processedIds.has(adId)) {
+            return;
+        }
         await fs.appendFile(this.processedFile, `${adId}\n`);
         this.processedIds.add(adId);
     }
 
     isProcessed(adId) {
+        if (!adId || adId.startsWith('temp_')) {
+            return false;
+        }
         return this.alwaysProcess ? false : this.processedIds.has(adId);
     }
 
@@ -1044,58 +1057,132 @@ class CianMailer {
             this.log('✅ Прокрутка завершена, ищу кнопки...');
 
             const buttonsData = await this.page.evaluate(() => {
+                const extractIdFromUrl = (url) => {
+                    if (!url) return null;
+                    try {
+                        const cleaned = url.split('?')[0];
+                        const parts = cleaned.split('/').filter(Boolean);
+                        for (let i = parts.length - 1; i >= 0; i--) {
+                            const part = parts[i];
+                            if (/^\d+$/.test(part)) {
+                                return part;
+                            }
+                        }
+                        const digits = cleaned.match(/\d{4,}/g);
+                        return digits ? digits[digits.length - 1] : null;
+                    } catch {
+                        return null;
+                    }
+                };
+
+                const extractIdFromAttributes = (card) => {
+                    if (!card) return null;
+                    const dataset = card.dataset || {};
+                    const attributeCandidates = [
+                        dataset.id,
+                        dataset.offerId,
+                        dataset.cianId,
+                        dataset.objectId,
+                        card.getAttribute('data-id'),
+                        card.getAttribute('data-offer-id'),
+                        card.getAttribute('data-cian-id'),
+                        card.getAttribute('data-product-id'),
+                        card.getAttribute('data-object-id')
+                    ].filter(Boolean);
+
+                    for (const candidate of attributeCandidates) {
+                        const id = extractIdFromUrl(candidate) || (/\d+/.test(candidate) ? candidate.match(/\d+/)[0] : null);
+                        if (id) return id;
+                    }
+                    return null;
+                };
+
+                const linkSelectors = [
+                    'a[href*="/rent/flat/"]',
+                    'a[href*="/sale/flat/"]',
+                    'a[href*="/flat/"]',
+                    'a[href*="/cat.php"]',
+                    '[data-name="LinkArea"] a',
+                    '[data-name="CardTitle"] a',
+                    'a[data-name="CardTitle"]',
+                    'a[data-name="LinkArea"]'
+                ];
+
+                const findAdLink = (card) => {
+                    for (const selector of linkSelectors) {
+                        const link = card.querySelector(selector);
+                        if (link && link.href) {
+                            return link;
+                        }
+                    }
+                    return null;
+                };
+
                 const cards = document.querySelectorAll('[data-name="CardComponent"], .card, [data-testid*="offer-card"], article');
                 console.log(`🔍 Найдено ${cards.length} карточек на странице`);
                 const buttons = [];
 
                 cards.forEach((card, index) => {
                     try {
-                        // Получаем ID и URL
-                        const link = card.querySelector('a[href*="/sale/flat/"]');
+                        const link = findAdLink(card);
                         const adUrl = link ? link.href : '';
-                        const adId = adUrl ? adUrl.split('/').filter(x => x).pop() : `temp_${index}`;
+                        let adId = extractIdFromUrl(adUrl);
+                        if (!adId) {
+                            adId = extractIdFromAttributes(card);
+                        }
+                        if (!adId && link) {
+                            adId = extractIdFromAttributes(link);
+                        }
 
-                        // Получаем адрес
+                        if (!adId) {
+                            const buttonWithDataset = card.querySelector('button[data-id], button[data-offer-id], button[data-cian-id]');
+                            if (buttonWithDataset) {
+                                adId = extractIdFromAttributes(buttonWithDataset);
+                            }
+                        }
+
+                        if (!adId) {
+                            adId = `temp_${index}`;
+                        }
+
                         const geoLabels = card.querySelectorAll('[data-name="GeoLabel"]');
                         let address = 'Не указано';
                         if (geoLabels.length > 0) {
                             const parts = Array.from(geoLabels)
-                                .map(el => el.textContent.trim())
+                                .map(el => (el.textContent || '').trim())
                                 .filter(text => text);
-                            address = parts.slice(0, 3).join(', ');
+                            if (parts.length > 0) {
+                                address = parts.slice(0, 3).join(', ');
+                            }
                         }
-                        
-                        // Если адрес не найден - пробуем альтернативные способы
+
                         if (address === 'Не указано') {
-                            const addressSpan = card.querySelector('[class*="geo"]');
-                            if (addressSpan) address = addressSpan.textContent.trim();
+                            const addressSpan = card.querySelector('[class*="geo"], [data-name="Address"]');
+                            if (addressSpan) address = (addressSpan.textContent || '').trim();
                         }
 
-                        // Получаем цену
                         let price = 'Не указано';
-                        const priceEl = card.querySelector('[data-mark="MainPrice"]') || 
-                                       card.querySelector('[class*="price"]');
+                        const priceEl = card.querySelector('[data-mark="MainPrice"], [data-testid*="price"], [class*="price"]');
                         if (priceEl) {
-                            price = priceEl.textContent.trim();
+                            price = (priceEl.textContent || '').trim();
                         }
 
-                        // Находим кнопку "Написать" - ищем ВСЕ кнопки
                         const allButtons = Array.from(card.querySelectorAll('button'));
                         const writeButton = allButtons.find(btn => {
-                            const text = btn.textContent.toLowerCase();
-                            return text.includes('написать') || 
-                                   text.includes('связаться') ||
-                                   text.includes('message') ||
-                                   text.includes('отправить');
+                            const text = (btn.textContent || '').toLowerCase();
+                            return text.includes('написать') ||
+                                text.includes('связаться') ||
+                                text.includes('message') ||
+                                text.includes('отправить');
                         });
-                        
+
                         if (writeButton) {
                             buttons.push({
                                 adId,
                                 address,
                                 price,
                                 cardIndex: index,
-                                buttonText: writeButton.textContent.trim()
+                                buttonText: (writeButton.textContent || '').trim()
                             });
                             console.log(`✅ Объявление #${buttons.length}: ${adId} - ${address}`);
                         }
@@ -2188,7 +2275,11 @@ class CianMailer {
         const baseUrl = this.searchBaseUrl || this.searchUrl;
         try {
             const url = new URL(baseUrl, 'https://www.cian.ru');
-            url.searchParams.set('p', pageNumber);
+            if (pageNumber <= 1) {
+                url.searchParams.delete('p');
+            } else {
+                url.searchParams.set('p', pageNumber);
+            }
             return url.toString();
         } catch (error) {
             this.log(`Не удалось сформировать URL для страницы ${pageNumber}: ${error.message}`, 'warning');
@@ -2213,9 +2304,17 @@ class CianMailer {
         try {
             const parsed = new URL(url, 'https://www.cian.ru');
             const pValue = parsed.searchParams.get('p');
-            if (!pValue) return parsed.pathname.includes('snyat-kvartiru') ? 1 : null;
-            const number = parseInt(pValue, 10);
-            return Number.isFinite(number) ? number : null;
+            if (pValue) {
+                const number = parseInt(pValue, 10);
+                return Number.isFinite(number) ? number : null;
+            }
+
+            const pathname = parsed.pathname || '';
+            if (pathname.includes('snyat-kvartiru') || pathname.includes('cat.php')) {
+                return 1;
+            }
+
+            return null;
         } catch {
             return null;
         }
