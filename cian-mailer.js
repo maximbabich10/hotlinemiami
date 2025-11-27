@@ -562,29 +562,25 @@ class CianMailer {
     async loginToCian() {
         try {
             this.log('🔐 Начинаем авторизацию на CIAN по номеру телефона...');
-            
+    
             await this.page.goto('https://www.cian.ru/', { waitUntil: 'networkidle2' });
-            
             await this.delay(2, 4);
-
+    
             // Кликаем на кнопку "Войти"
             this.log('Ищу кнопку "Войти"...');
             await this.page.waitForSelector('[data-name="LoginButton"], a[href*="auth"]', { timeout: 10000 });
             await this.page.click('[data-name="LoginButton"], a[href*="auth"]');
             await this.delay(2, 4);
-
+    
             // ШАГ 1: Ждём МОДАЛЬНОЕ ОКНО авторизации
             this.log('🔍 Ищу модальное окно авторизации...');
             await this.page.waitForSelector('[role="dialog"], .modal, [class*="Modal"]', { timeout: 10000 });
             this.log('✅ Найдено модальное окно');
             await this.delay(2, 4);
-            
+    
             // ШАГ 2: Ищем и заполняем поле телефона (по умолчанию показывается)
             this.log('🔍 Ищу поле ввода телефона в модальном окне...');
-
-            
             try {
-                // Ждем появления поля телефона ВНУТРИ модального окна
                 const phoneInput = await this.page.evaluateHandle(() => {
                     const modal = document.querySelector('[role="dialog"]') || 
                                  document.querySelector('.modal') || 
@@ -592,7 +588,6 @@ class CianMailer {
                     
                     if (!modal) return null;
                     
-                    // Ищем поле телефона ВНУТРИ модального окна
                     return modal.querySelector('input[type="tel"]') || 
                            modal.querySelector('input[name="phone"]') ||
                            modal.querySelector('input[autocomplete="tel"]') ||
@@ -600,45 +595,44 @@ class CianMailer {
                            modal.querySelector('input[placeholder*="Телефон"]') ||
                            modal.querySelector('input[type="text"]');
                 });
-                
+    
                 const phoneElement = phoneInput.asElement();
                 if (!phoneElement) {
                     throw new Error('Поле телефона не найдено в модальном окне');
                 }
-                
+    
                 this.log('✅ Найдено поле телефона в модальном окне');
-                
+    
                 // Форматируем номер: добавляем +7
                 const formattedPhone = `+7 (${this.phone.substring(0, 3)}) ${this.phone.substring(3, 6)}-${this.phone.substring(6, 8)}-${this.phone.substring(8, 10)}`;
                 this.log(`📱 Ввожу номер: +7 (${this.phone.substring(0, 3)}) ***-**-${this.phone.substring(8, 10)}`);
-                
+    
                 // Делаем поле видимым и активным
                 await phoneElement.evaluate(el => {
                     el.scrollIntoView({ block: 'center' });
                 });
                 await this.delay(0.5, 0.5);
-                
+    
                 // Фокусируемся и очищаем
                 await phoneElement.focus();
                 await this.delay(0.3, 0.3);
-                
+    
                 await phoneElement.evaluate(el => el.value = '');
                 await this.delay(0.2, 0.2);
-                
+    
                 // Вводим номер ПОСИМВОЛЬНО с задержками (как человек)
                 for (const char of formattedPhone) {
                     await phoneElement.type(char, { delay: Math.random() * 100 + 50 });
                 }
-                
+    
                 await this.delay(0.5, 1);
                 this.log('✅ Номер телефона введён посимвольно');
-                
             } catch (e) {
                 this.log(`❌ Ошибка ввода телефона: ${e.message}`, 'error');
                 await this.page.screenshot({ path: 'phone_input_error.png' });
                 throw e;
             }
-
+    
             // ШАГ 3: Нажимаем "Получить код"
             this.log('🔍 Ищу кнопку "Получить код" в модальном окне...');
             const clickedGetCode = await this.page.evaluate(() => {
@@ -661,40 +655,38 @@ class CianMailer {
                 }
                 return false;
             });
-            
+    
             if (!clickedGetCode) {
                 this.log('❌ Кнопка "Получить код" не найдена!', 'error');
                 await this.page.screenshot({ path: 'get_code_not_found.png' });
                 throw new Error('Кнопка "Получить код" не найдена');
             }
-            
+    
             this.log('✅ Кнопка "Получить код" нажата!');
             this.log('📨 Код отправлен на номер +7 (***) ***-**-' + this.phone.substring(8, 10));
             await this.delay(2, 4);
-            
-
+    
             // ШАГ 4: Запрашиваем код у пользователя через Telegram и ждём ввода
             this.log('⏳ Жду ввода кода подтверждения от пользователя...');
-            
+    
             if (!this.onCodeRequest) {
                 throw new Error('Callback onCodeRequest не настроен! Не могу запросить код у пользователя.');
             }
-            
+    
             // Запрашиваем код у пользователя через callback (Telegram бот)
             const code = await this.onCodeRequest();
-            
+    
             if (!code || code.length < 4) {
                 throw new Error('Получен неверный код подтверждения');
             }
-            
+    
             this.log(`✅ Получен код от пользователя: ${code.substring(0, 2)}**`);
-            
+    
             // ШАГ 5: Ищем поле для ввода кода
             this.log('🔍 Ищу поле для ввода кода...');
-            
             try {
                 await this.delay(2, 3); // Даем время загрузиться полю для кода
-                
+    
                 const codeInput = await this.page.evaluateHandle(() => {
                     const modal = document.querySelector('[role="dialog"]') || 
                                  document.querySelector('.modal') || 
@@ -702,212 +694,114 @@ class CianMailer {
                     
                     if (!modal) return null;
                     
-                    // Ищем поле для кода (обычно это input[type="text"] с placeholder про код)
                     return modal.querySelector('input[placeholder*="код"]') ||
                            modal.querySelector('input[placeholder*="Код"]') ||
                            modal.querySelector('input[name="code"]') ||
                            modal.querySelector('input[type="text"]');
                 });
-                
+    
                 const codeElement = codeInput.asElement();
                 if (!codeElement) {
                     throw new Error('Поле для ввода кода не найдено');
                 }
-                
+    
                 this.log('✅ Найдено поле для ввода кода');
-                
+    
                 // Делаем поле видимым и активным
                 await codeElement.evaluate(el => {
                     el.scrollIntoView({ block: 'center' });
                 });
                 await this.delay(0.5, 0.5);
-                
+    
                 // Фокусируемся и очищаем
                 await codeElement.focus();
                 await this.delay(0.3, 0.3);
-                
+    
                 await codeElement.evaluate(el => el.value = '');
                 await this.delay(0.2, 0.2);
-                
+    
                 // Вводим код ПОСИМВОЛЬНО с задержками
                 this.log('🔢 Ввожу код подтверждения...');
                 for (const char of code) {
                     await codeElement.type(char, { delay: Math.random() * 100 + 50 });
                 }
-                
+    
                 await this.delay(0.5, 1);
                 this.log('✅ Код введён посимвольно');
-                
             } catch (e) {
                 this.log(`❌ Ошибка ввода кода: ${e.message}`, 'error');
                 await this.page.screenshot({ path: 'code_input_error.png' });
                 throw e;
             }
-
-            // Проверяем есть ли финальная кнопка подтверждения (обычно авторизация происходит автоматически)
-            this.log('🔘 Проверяю наличие финальной кнопки подтверждения...');
-            
-            await this.delay(2, 3); // Даем время на автоматическую авторизацию
-            
-            // Делаем скриншот
-            await this.page.screenshot({ path: 'before_final_submit.png' });
-            this.log('📸 Скриншот: before_final_submit.png');
-            
-            const clickedFinalSubmit = await this.page.evaluate(() => {
-                const modal = document.querySelector('[role="dialog"]') || 
-                             document.querySelector('.modal') || 
-                             document.querySelector('[class*="Modal"]');
-                             
-                if (modal) {
-                    const buttons = Array.from(modal.querySelectorAll('button'));
-                    
-                    const submitBtn = buttons.find(btn => 
-                        btn.textContent.includes('Продолжить') || 
-                        btn.textContent.includes('Войти') ||
-                        btn.textContent.includes('Подтвердить') ||
-                        btn.type === 'submit'
-                    );
-                    
-                    if (submitBtn) {
-                        submitBtn.click();
-                        return true;
-                    }
-                }
-                return false;
+    
+            // ШАГ 6: Выбор аккаунта (второй вариант)
+            this.log('🔍 Ищу модальное окно выбора аккаунта...');
+            const accountChoiceModal = await this.page.waitForSelector('div[role="dialog"], .modal, [class*="Modal"]', { timeout: 10000 });
+            if (!accountChoiceModal) {
+                this.log('❌ Модальное окно выбора аккаунта не найдено', 'error');
+                throw new Error('Модальное окно выбора аккаунта не найдено');
+            }
+    
+            // Ищем второй аккаунт
+            this.log('🔍 Ищу второй аккаунт...');
+            const secondAccountButton = await this.page.evaluateHandle(() => {
+                const accountButtons = Array.from(document.querySelectorAll('button.x52a3aa3b--e19165--btn'));
+                return accountButtons.find(button => {
+                    const emailText = button.querySelector('span.x52a3aa3b--d95e31--account-content--email')?.textContent.trim();
+                    return emailText === 'ALEXANERDMITRIEV9910019876@yandex.ru'; // Второй аккаунт
+                });
             });
-            
-            if (!clickedFinalSubmit) {
-                this.log('ℹ️  Финальная кнопка не найдена - возможно авторизация произошла автоматически', 'warning');
-            } else {
-                this.log('✅ Финальная кнопка нажата!');
+    
+            if (!secondAccountButton) {
+                this.log('❌ Второй аккаунт не найден', 'error');
+                throw new Error('Не найден второй аккаунт');
             }
-            
-            this.log('⏳ Жду закрытия модального окна и завершения авторизации...');
-            
-            // Ждем закрытия модального окна (до 30 секунд)
-            // ВАЖНО: Если произойдет навигация (редирект) - это ХОРОШО, значит авторизация успешна!
-            let modalClosed = false;
-            let navigationOccurred = false;
-            
-            try {
-                for (let attempt = 0; attempt < 30; attempt++) {
-                    await this.delay(1, 1);
-                    
-                    try {
-                        modalClosed = await this.page.evaluate(() => {
-                            const modal = document.querySelector('[role="dialog"]') || 
-                                         document.querySelector('.modal') || 
-                                         document.querySelector('[class*="Modal"]');
-                            
-                            if (!modal) return true; // Модалки нет - хорошо
-                            
-                            // Проверяем что модалка скрыта
-                            const isHidden = modal.style.display === 'none' || 
-                                            modal.style.visibility === 'hidden' ||
-                                            modal.getAttribute('aria-hidden') === 'true' ||
-                                            !modal.offsetParent;
-                            
-                            return isHidden;
-                        });
-                        
-                        if (modalClosed) {
-                            this.log(`✅ Модальное окно закрылось через ${attempt + 1} секунд`);
-                            break;
-                        }
-                        
-                        // Каждые 5 секунд делаем отчет
-                        if (attempt % 5 === 0 && attempt > 0) {
-                            this.log(`⏳ Жду... (${attempt} сек)`);
-                        }
-                    } catch (evalError) {
-                        // Если "Execution context was destroyed" - значит произошла навигация
-                        if (evalError.message.includes('Execution context was destroyed') || 
-                            evalError.message.includes('navigation')) {
-                            this.log('✅ Произошла навигация страницы - авторизация успешна!', 'success');
-                            navigationOccurred = true;
-                            modalClosed = true;
-                            break;
-                        }
-                        // Другие ошибки - пробрасываем
-                        throw evalError;
-                    }
-                }
-                
-                if (!modalClosed && !navigationOccurred) {
-                    this.log('⚠️ Модальное окно не закрылось за 30 секунд, но продолжаю...', 'warning');
-                    await this.page.screenshot({ path: 'modal_not_closed_30sec.png' });
-                }
-                
-            } catch (error) {
-                // Если произошла навигация - это нормально!
-                if (error.message.includes('Execution context was destroyed') || 
-                    error.message.includes('navigation')) {
-                    this.log('✅ Произошла навигация после авторизации - это нормально!', 'success');
-                    navigationOccurred = true;
-                } else {
-                    this.log(`⚠️ Ошибка при проверке модального окна: ${error.message}`, 'warning');
-                }
+    
+            await secondAccountButton.click();
+            this.log('✅ Второй аккаунт выбран');
+    
+            // ШАГ 7: Ввод пароля
+            this.log('🔍 Ищу поле ввода пароля...');
+            const passwordInput = await this.page.waitForSelector('input[name="password"]', { timeout: 10000 });
+            if (!passwordInput) {
+                this.log('❌ Поле для ввода пароля не найдено', 'error');
+                throw new Error('Поле для ввода пароля не найдено');
             }
-            
-            // Дополнительная пауза после закрытия
-            await this.delay(3, 5);
-
-            // ФИНАЛЬНАЯ ПРОВЕРКА АВТОРИЗАЦИИ
-            this.log('\n🔍 НАЧИНАЮ ПРОВЕРКУ АВТОРИЗАЦИИ...');
-            
-            // Если произошла навигация - значит авторизация 100% успешна!
-            if (navigationOccurred) {
-                this.log('✅ Навигация после авторизации подтверждена');
-                this.log('✅ АВТОРИЗАЦИЯ УСПЕШНА!', 'success');
-                
-                try {
-                    await this.page.screenshot({ path: 'auth_success.png' });
-                    this.log('📸 Скриншот: auth_success.png');
-                } catch (e) {
-                    // Игнорируем ошибки скриншота
-                }
-                
-                return true;
+    
+            await passwordInput.focus();
+            await this.delay(0.3, 0.3);
+            await passwordInput.evaluate(el => el.value = '');
+            await this.delay(0.2, 0.2);
+    
+            const password = 'Alex3310';
+            this.log(`🔑 Вводим пароль: ${password}`);
+            await passwordInput.type(password, { delay: Math.random() * 100 + 50 });
+            await this.delay(0.5, 1);
+    
+            // Нажимаем кнопку "Войти"
+            const loginButton = await this.page.$('button[data-name="LoginBtn"]');
+            if (!loginButton) {
+                this.log('❌ Кнопка "Войти" не найдена', 'error');
+                throw new Error('Кнопка "Войти" не найдена');
             }
-            
-            // Если навигации не было - проверяем URL
-            await this.delay(2, 3); // Даем время на полную загрузку
-            
-            try {
-                const currentUrl = this.page.url();
-                this.log(`📋 Текущий URL: ${currentUrl}`);
-                
-                if (currentUrl.includes('auth') || currentUrl.includes('login')) {
-                    this.log('❌ Остались на странице входа - авторизация не удалась', 'error');
-                    await this.page.screenshot({ path: 'auth_failed_still_on_login.png' });
-                    throw new Error('Ошибка авторизации - остались на странице входа');
-                }
-                
-                this.log('✅ URL в порядке - НЕ на странице входа');
-                this.log('✅ Модальное окно закрылось');
-                this.log('\n✅ АВТОРИЗАЦИЯ УСПЕШНА!', 'success');
-                
-                // Сохраняем скриншот успешной авторизации
-                await this.page.screenshot({ path: 'auth_success.png' });
-                this.log('📸 Скриншот: auth_success.png');
-                
-                return true;
-                
-            } catch (error) {
-                // Если произошла ошибка при проверке URL - возможно снова навигация
-                if (error.message.includes('Execution context was destroyed') || 
-                    error.message.includes('navigation')) {
-                    this.log('✅ Навигация подтверждена - авторизация успешна!', 'success');
-                    return true;
-                }
-                // Пробрасываем другие ошибки
-                throw error;
-            }
+    
+            await loginButton.click();
+            this.log('✅ Кнопка "Войти" нажата');
+    
+            // ШАГ 8: Ждем завершения авторизации
+            this.log('⏳ Жду завершения авторизации...');
+            await this.page.waitForNavigation({ waitUntil: 'networkidle0' });
+    
+            this.log('✅ Авторизация успешна!');
+            return true;
+    
         } catch (error) {
             this.log(`Ошибка авторизации: ${error.message}`, 'error');
             return false;
         }
     }
+    
+    
 
     async applyFiltersViaUI() {
         try {
