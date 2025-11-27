@@ -335,64 +335,69 @@ bot.on('message', async (msg) => {
         if (state.step === 'collecting_messages') {
             const maxVariants = state.expectedMessages || MESSAGE_VARIANTS_REQUIRED;
             const currentMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-
+        
             if (currentMessages.length >= maxVariants) {
                 bot.sendMessage(chatId, '⚠️ Все варианты уже получены. Если хотите начать заново, нажмите «❌ Отмена».', { ...cancelKeyboard });
                 return;
             }
-
+        
+            // Преобразуем полученный текст в список строк, сохраняя форматирование (переносы строк и пробелы)
             const candidates = text
-                .split('\n')
-                .map(part => part.trim())
-                .filter(part => part.length > 0);
-
+                .split('\n') // Разделяем текст на строки
+                .map(part => part.trim()) // Убираем лишние пробелы по бокам каждой строки
+                .filter(part => part.length > 0); // Игнорируем пустые строки
+        
             if (candidates.length === 0) {
                 bot.sendMessage(chatId, '⚠️ Похоже, сообщение было пустым. Отправьте вариант ещё раз.', { parse_mode: 'Markdown', ...cancelKeyboard });
                 return;
             }
-
-            const candidate = candidates[0];
-            const ignored = Math.max(0, candidates.length - 1);
-
+        
+            // Сохраняем все варианты сообщений, объединяя их в одно сообщение с разделением строк
+            const candidate = candidates.join('\n'); // Объединяем все строки в один текст с разделением строк
+            const ignored = Math.max(0, candidates.length - 1); // Игнорируем дополнительные строки, если они есть
+        
+            // Добавляем сообщение в список
             currentMessages.push(candidate);
             state.messages = currentMessages;
             state.expectedMessages = maxVariants;
-
+        
             if (currentMessages.length >= maxVariants) {
                 const messages = currentMessages.slice(0, maxVariants);
                 state.savedMessages = messages;
                 state.step = 'messages_ready';
                 delete state.messages;
                 userStates.set(userId, state);
-
+        
                 const preview = messages
                     .map((msg, idx) => `**${idx + 1}.** ${formatMessagePreview(msg)}`)
                     .join('\n');
-
+        
                 let extraNotice = '';
                 if (ignored > 0) {
                     extraNotice = `\n⚠️ Дополнительные строки в последнем сообщении проигнорированы. Отправляйте варианты отдельными сообщениями.`;
                 }
-
+        
                 bot.sendMessage(chatId, `✅ Все ${maxVariants} варианта получены!\n\n📝 **Ваши варианты сообщений:**\n${preview}\n\n✅ Варианты сохранены! Теперь можете запустить рассылку.${extraNotice}`, { parse_mode: 'Markdown', ...mainKeyboard });
                 return;
             }
-
+        
             userStates.set(userId, state);
-
+        
             const collected = currentMessages.length;
             const nextIndex = collected + 1;
             const label = ordinalLabel(nextIndex);
             const remaining = maxVariants - collected;
-
+        
             let extraNotice = '';
             if (ignored > 0) {
                 extraNotice = '\n⚠️ Дополнительные строки в сообщении проигнорированы. Каждое сообщение должно содержать только один вариант.';
             }
-
+        
             bot.sendMessage(chatId, `✅ Получено вариантов: ${collected}/${maxVariants}.\n\nОтправьте **${label} вариант** сообщения.${extraNotice}`, { parse_mode: 'Markdown', ...cancelKeyboard });
             return;
         }
+        
+        
         
         // Ожидание номера телефона при регистрации
         if (state.step === 'awaiting_phone') {
