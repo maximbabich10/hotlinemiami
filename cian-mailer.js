@@ -739,7 +739,7 @@ class CianMailer {
             const accountChoiceModal = await this.page.waitForSelector('div[role="dialog"], .modal, [class*="Modal"]', { timeout: 10000 });
             if (!accountChoiceModal) {
                 this.log('❌ Модальное окно выбора аккаунта не найдено', 'error');
-                throw new Error('Модальное окно выбора аккаунта не найдено');
+                // throw new Error('Модальное окно выбора аккаунта не найдено');
             }
     
             // Ищем второй аккаунт
@@ -754,7 +754,7 @@ class CianMailer {
     
             if (!secondAccountButton) {
                 this.log('❌ Второй аккаунт не найден', 'error');
-                throw new Error('Не найден второй аккаунт');
+                // throw new Error('Не найден второй аккаунт');
             }
     
             await secondAccountButton.click();
@@ -765,24 +765,27 @@ class CianMailer {
             const passwordInput = await this.page.waitForSelector('input[name="password"]', { timeout: 10000 });
             if (!passwordInput) {
                 this.log('❌ Поле для ввода пароля не найдено', 'error');
-                throw new Error('Поле для ввода пароля не найдено');
+                // throw new Error('Поле для ввода пароля не найдено');
             }
     
+            if(passwordInput) {
+
+            
             await passwordInput.focus();
             await this.delay(0.3, 0.3);
             await passwordInput.evaluate(el => el.value = '');
             await this.delay(0.2, 0.2);
-    
+            
             const password = 'Alex3310';
             this.log(`🔑 Вводим пароль: ${password}`);
             await passwordInput.type(password, { delay: Math.random() * 100 + 50 });
             await this.delay(0.5, 1);
-    
+            }
             // Нажимаем кнопку "Войти"
             const loginButton = await this.page.$('button[data-name="LoginBtn"]');
             if (!loginButton) {
                 this.log('❌ Кнопка "Войти" не найдена', 'error');
-                throw new Error('Кнопка "Войти" не найдена');
+                // throw new Error('Кнопка "Войти" не найдена');
             }
     
             await loginButton.click();
