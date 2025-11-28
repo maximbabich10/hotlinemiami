@@ -282,7 +282,7 @@ class CianMailer {
             return true;
         } catch (error) {
             this.log(`Ошибка запуска браузера: ${error.message}`, 'error');
-            return false;
+            // return false;
         }
     }
 
@@ -797,7 +797,7 @@ class CianMailer {
     
         } catch (error) {
             this.log(`Ошибка авторизации: ${error.message}`, 'error');
-            return false;
+            // return false;
         }
     }
     
